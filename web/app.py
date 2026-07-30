@@ -1,0 +1,677 @@
+# -*- coding: utf-8 -*-
+"""
+黄埭镇蓝藻卫星监控系统 · 交互式网站后端
+======================================
+把「哨兵二号(Sentinel-2) 水体边界精修 + 蓝藻多指数检测」流水线包装成
+一个极简、零额外依赖的 Web 服务（仅用 Python 标准库 http.server）。
+
+- 通过 importlib 直接复用已验证的 S2 处理脚本 S2_水体边界_黄埭镇.py
+- /api/status   返回最近一次分析结果 (outputs/result.json)
+- /api/analyze  按阈值/日期重跑流水线，生成新的 PNG / GeoJSON / result.json
+- 其余路径作为静态文件服务 (前端 + outputs)
+
+运行:
+  cd /Users/shiyusheng/Documents/黄棣镇蓝藻卫星监控系统
+  PYTHONPATH=/tmp/pylibs GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR CPL_VSIL_CURL_USE_HEAD=NO \
+      /usr/bin/python3 web/app.py
+"""
+import importlib.util, os, json, math, base64, io, sys, re, shutil
+import rasterio
+from rasterio.features import rasterize as _rasterize
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+import numpy as np
+
+# ---------- 路径 ----------
+HERE   = os.path.dirname(os.path.abspath(__file__))
+ROOT   = os.path.dirname(HERE)                 # 项目根目录
+OUT    = os.path.join(HERE, "outputs")
+STATIC = os.path.join(HERE, "static")
+os.makedirs(OUT, exist_ok=True)
+
+# ---------- 载入已验证的 S2 流水线 (中文文件名脚本) ----------
+spec = importlib.util.spec_from_file_location(
+    "s2pipe", os.path.join(ROOT, "S2_水体边界_黄埭镇.py"))
+s2pipe = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(s2pipe)
+P = s2pipe  # alias
+
+# ---------- 机器学习藻华检测（半监督随机森林） ----------
+import sys as _sys
+_sys.path.insert(0, ROOT)
+try:
+    import bloom_ml as ML
+except Exception as _e:
+    ML = None
+    print("[ml] 未启用（", _e, "）")
+
+
+CENTER_LON, CENTER_LAT = P.CENTER_LON, P.CENTER_LAT
+TARGET_RES = P.TARGET_RES
+BUFFER_M = 5000   # ★ 与 GEE 参考版 GEE_S2_蓝藻_黄埭镇.py 完全一致：roi = point.buffer(5000)
+
+# 5km 缓冲区圆形 ROI（与 GEE clip(roi) 一致）的 bbox
+_dlat = BUFFER_M / 110540.0
+_dlon = BUFFER_M / (111320.0 * math.cos(math.radians(CENTER_LAT)))
+_buffer_bbox = (round(CENTER_LON - _dlon, 6), round(CENTER_LAT - _dlat, 6),
+                round(CENTER_LON + _dlon, 6), round(CENTER_LAT + _dlat, 6))
+
+# ★ 分析网格 = 黄埭镇行政边界 bbox ∪ 5km 缓冲 bbox（两者都完整落入，避免裁剪镇域西/东缘）
+import json as _json
+_bd = _json.load(open(os.path.join(ROOT, "黄埭镇边界.json"), encoding="utf-8"))
+_olons = [p[0] for p in _bd["outer"]]; _olats = [p[1] for p in _bd["outer"]]
+_bd_bbox = (min(_olons), min(_olats), max(_olons), max(_olats))
+BBOX = (min(_bd_bbox[0], _buffer_bbox[0]), min(_bd_bbox[1], _buffer_bbox[1]),
+        max(_bd_bbox[2], _buffer_bbox[2]), max(_bd_bbox[3], _buffer_bbox[3]))
+print(f"[grid] 分析网格 bbox={BBOX}  (镇域{_bd_bbox} ∪ 5km缓冲{_buffer_bbox})")
+
+# ---------- 模块级：栅格网格 / 墨卡托边界 / 高德 GCJ 偏移 ----------
+NCOL = int(round((BBOX[2]-BBOX[0])*111320*math.cos(math.radians(CENTER_LAT))/TARGET_RES))
+NROW = int(round((BBOX[3]-BBOX[1])*110540/TARGET_RES))
+DST_TRANSFORM = P.fb(BBOX[0], BBOX[1], BBOX[2], BBOX[3], NCOL, NROW)
+DST_SHAPE = (NROW, NCOL)
+
+# ★ 5km 缓冲区圆形 ROI 掩膜（与 GEE clip(roi) 一致；行政边界仅作黄色参考线，见前端）
+def _buffer_geom():
+    pts = []
+    for k in range(96):
+        a = 2 * math.pi * k / 96
+        dlat = BUFFER_M * math.sin(a) / 110540.0
+        dlon = BUFFER_M * math.cos(a) / (111320.0 * math.cos(math.radians(CENTER_LAT)))
+        pts.append([CENTER_LON + dlon, CENTER_LAT + dlat])
+    pts.append(pts[0])
+    return {'type': 'Polygon', 'coordinates': [pts]}
+ROI_GEOM = _buffer_geom()
+ROI_MASK = _rasterize([(ROI_GEOM, 1)], out_shape=DST_SHAPE, transform=DST_TRANSFORM, fill=0).astype(bool)
+
+# ★ 黄埭镇行政边界（OSM relation 7763011）—— 权威多边形，用于"精确切出镇域"显示
+def _town_geom():
+    import json as _json
+    bd = _json.load(open(os.path.join(ROOT, "黄埭镇边界.json"), encoding="utf-8"))
+    outer = [[p[0], p[1]] for p in bd["outer"]]
+    if outer[0] != outer[-1]:
+        outer = outer + [outer[0]]
+    return {"type": "Polygon", "coordinates": [outer]}
+BD_GEOM = _town_geom()
+BD_MASK = _rasterize([(BD_GEOM, 1)], out_shape=DST_SHAPE, transform=DST_TRANSFORM, fill=0).astype(bool)
+BD_AREA_HA = round(float(BD_MASK.sum()) * TARGET_RES * TARGET_RES / 1e4, 1)  # 镇域面积约 49 km²
+
+_RM = 6378137.0
+def _mx(lon): return math.radians(lon) * _RM
+def _my(lat): return math.log(math.tan(math.pi/4 + math.radians(lat)/2)) * _RM
+BBOX_MERC = (_mx(BBOX[0]), _my(BBOX[1]), _mx(BBOX[2]), _my(BBOX[3]))
+
+def _gcj_shift(lon, lat):
+    """与前端一致的 WGS84->GCJ-02 偏移（近似恒定，用于高德瓦片对齐）。"""
+    if not (73.66 < lon < 135.05 and 3.86 < lat < 53.55):
+        return 0.0, 0.0
+    a = 6378245.0; ee = 0.00669342162296594323
+    dLat = -100 + 2*lon + 3*lat + 0.2*lat*lat + 0.1*lon*lat + 0.2*math.sqrt(abs(lon))
+    dLat += (20*math.sin(6*lon*math.pi) + 20*math.sin(2*lon*math.pi))*2/3
+    dLat += (20*math.sin(lat*math.pi) + 40*math.sin(lat/3*math.pi))*2/3
+    dLat += (160*math.sin(lat/12*math.pi) + 320*math.sin(lat*math.pi/30))*2/3
+    dLon = 300 + lon + 2*lat + 0.1*lon*lon + 0.1*lon*lat + 0.1*math.sqrt(abs(lon))
+    dLon += (20*math.sin(6*lon*math.pi) + 20*math.sin(2*lon*math.pi))*2/3
+    dLon += (20*math.sin(lon*math.pi) + 40*math.sin(lon/3*math.pi))*2/3
+    dLon += (150*math.sin(lon/12*math.pi) + 300*math.sin(lon/30*math.pi))*2/3
+    radLat = lat/180.0*math.pi
+    magic = math.sin(radLat); magic = 1 - ee*magic*magic
+    sqrtMagic = math.sqrt(magic)
+    dLat = (dLat*180.0)/((a*(1-ee))/(magic*sqrtMagic)*math.pi)
+    dLon = (dLon*180.0)/(a/sqrtMagic*math.cos(radLat)*math.pi)
+    return dLon, dLat
+
+_cx, _cy = (BBOX[0]+BBOX[2])/2, (BBOX[1]+BBOX[3])/2
+GCJ_DLON, GCJ_DLAT = _gcj_shift(_cx, _cy)
+
+# =====================================================================
+# 核心分析函数 —— 直接复用 s2pipe 的已验证函数
+# =====================================================================
+def _load_bands(item, date_tag):
+    """读取 S2 波段 (缓存 / 否则从 AWS COG 下载)。返回 dict。"""
+    dst_transform = P.fb(BBOX[0], BBOX[1], BBOX[2], BBOX[3],
+                         int(round((BBOX[2]-BBOX[0])*111320*math.cos(math.radians(CENTER_LAT))/TARGET_RES)),
+                         int(round((BBOX[3]-BBOX[1])*110540/TARGET_RES)))
+    dst_shape = (int(round((BBOX[3]-BBOX[1])*110540/TARGET_RES)),
+                 int(round((BBOX[2]-BBOX[0])*111320*math.cos(math.radians(CENTER_LAT))/TARGET_RES)))
+    dst_bounds = BBOX
+    cache = f"/tmp/s2_bands_{date_tag}.npz"
+    if os.path.exists(cache):
+        d = np.load(cache)
+        return dict(zip(['B02','B03','B04','B05','B06','B08','B11','SCL'],
+                        [d[k] for k in ['B02','B03','B04','B05','B06','B08','B11','SCL']])), \
+               dst_transform, dst_shape, dst_bounds
+    A = item['assets']
+    hrefs = {k: A[k]['href'] for k in ['blue','green','red','rededge1','rededge2','nir','swir16','scl']}
+    def rb(url, resampling=P.Resampling.bilinear, scale=10000.0):
+        a = P.read_band_window(url, dst_transform, dst_shape, 'EPSG:4326', resampling, dst_bounds)
+        return a/scale if scale else a
+    bands = {
+        'B02': rb(hrefs['blue']), 'B03': rb(hrefs['green']), 'B04': rb(hrefs['red']),
+        'B05': rb(hrefs['rededge1']), 'B06': rb(hrefs['rededge2']), 'B08': rb(hrefs['nir']),
+        'B11': rb(hrefs['swir16']), 'SCL': rb(hrefs['scl'], P.Resampling.nearest, 0).astype(int),
+    }
+    save = {k: bands[k] for k in ['B02','B03','B04','B05','B06','B08','B11','SCL']}
+    np.savez(cache, **save)
+    return bands, dst_transform, dst_shape, dst_bounds
+
+# ---------- 45 天 median 合成（与 GEE 参考版 GEE_S2_蓝藻_黄埭镇.py 完全一致） ----------
+STAC_BASE = "https://earth-search.aws.element84.com/v1/collections/sentinel-2-l2a/items"
+
+def _query_stac(start, end):
+    api = (STAC_BASE + f"?bbox={BBOX[0]},{BBOX[1]},{BBOX[2]},{BBOX[3]}"
+           f"&datetime={start}T00:00:00Z/{end}T23:59:59Z&limit=100")
+    feats = json.load(urllib_request(api))["features"]
+    return [f for f in feats if float(f["properties"]["eo:cloud_cover"]) < 60]
+
+def _build_composite():
+    """45 天窗口内多景 median 合成（GEE: s2.median().clip(roi)）。
+    逐景用 SCL 做云掩膜（清晰像元 = 非 SCL_MASK = {4,5,6,7}），再对所有景做
+    per-pixel 中位数（nanmedian 自动跳过被云掩掉的 NaN 像元）。"""
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    start = (now - _dt.timedelta(days=45)).strftime('%Y-%m-%d')
+    end = now.strftime('%Y-%m-%d')
+    feats = _query_stac(start, end)
+    extra = 0
+    while len(feats) < 3 and extra <= 90:      # GEE MIN_SCENES = 3
+        extra += 30
+        sw = (now - _dt.timedelta(days=45 + extra)).strftime('%Y-%m-%d')
+        feats = _query_stac(sw, end)
+    feats = sorted(feats, key=lambda x: x["properties"]["datetime"])
+    if not feats:
+        raise RuntimeError("45 天窗口内无可用 S2 场景（云量过高）")
+    latest = feats[-1]
+    latest_date = latest["properties"]["datetime"][:10]
+    print(f"[composite] {len(feats)} 景 median 合成 | 窗口 {start}->{end} | 最新 {latest_date}")
+    for f in feats:
+        print("   -", f["properties"]["datetime"][:10],
+              "cloud=%.1f%%" % f["properties"]["eo:cloud_cover"], f["id"])
+
+    keys = ['B02','B03','B04','B05','B06','B08','B11']
+    stacks = {k: [] for k in keys}
+    used = []
+    for f in feats:
+        dt = f["properties"]["datetime"][:10].replace("-", "")
+        try:
+            b, _, _, _ = _load_bands(f, dt)
+        except Exception as e:
+            print("  [skip]", f["id"], e); continue
+        scl = b['SCL']
+        clear = ~np.isin(scl, list(P.SCL_MASK)) if scl.size else np.zeros(DST_SHAPE, bool)
+        for k in keys:
+            arr = b[k].astype(np.float32).copy()
+            arr[~clear] = np.nan
+            stacks[k].append(arr)
+        used.append(f["properties"]["datetime"][:10])
+    comp = {}
+    for k in keys:
+        comp[k] = (np.nanmedian(np.stack(stacks[k], 0), 0)
+                   if stacks[k] else np.full(DST_SHAPE, np.nan, np.float32))
+    meta = {
+        "n_scenes": len(used),
+        "dates": used,
+        "latest_date": latest_date,
+        "latest_id": latest["id"],
+        "latest_cloud": float(latest["properties"]["eo:cloud_cover"]),
+    }
+    return comp, meta
+
+def _vectorize_with_stats(mask, dst_transform, arr, tol_m=15.0):
+    """把二值掩膜矢量化，并为每个多边形附加 arr 的均值统计 -> FeatureCollection。"""
+    from rasterio.features import shapes, rasterize
+    from shapely.geometry import shape, mapping
+    import shapely.ops
+    feats = []
+    for geom, val in shapes(mask.astype(np.uint8), transform=dst_transform):
+        if val != 1:
+            continue
+        g = shape(geom).simplify(tol_m, preserve_topology=True)
+        if not g.is_valid:
+            g = shapely.ops.unary_union([g.buffer(0)])
+        polys = g.geoms if g.geom_type == 'MultiPolygon' else [g]
+        for gg in polys:
+            if gg.area <= 0:
+                continue
+            gm = mapping(gg)
+            # 计算该多边形内 arr 的均值
+            m = rasterize([(gm, 1)], out_shape=mask.shape, transform=dst_transform, fill=0).astype(bool)
+            arr_m = arr[m] if m.sum() else np.array([np.nan])
+            area_ha = m.sum()*TARGET_RES*TARGET_RES/1e4
+            feats.append({
+                "type": "Feature",
+                "properties": {
+                    "area_ha": round(float(area_ha), 3),
+                    "mean": None if np.isnan(arr_m).all() else round(float(np.nanmean(arr_m)), 4),
+                },
+                "geometry": gm,
+            })
+    return {"type": "FeatureCollection", "features": feats}
+
+def analyze(ndci_thr=0.10, fai_thr=0.005, mci_thr=0.005, jrc_thr=10, date=None, roi="town"):
+    """运行完整流水线（与 GEE 参考版 GEE_S2_蓝藻_黄埭镇.py 完全一致）：
+    45 天 median 合成 + MNDWI>0.10&JRC>10 水体 + NDCI>0.10 OR FAI>0.005 藻华。
+    date= 时退化为单景调试模式。
+    roi= "town"  → 显示/统计精确裁剪到黄埭镇行政边界（默认，直观）；
+         "gee"   → 沿用 GEE 的 5km 缓冲区圆形 ROI（与 GEE 数字逐字对齐）。"""
+    # 1) 场景选择：默认 45 天 median 合成；date= 时单景
+    if date:
+        api = (STAC_BASE + f"?bbox={BBOX[0]},{BBOX[1]},{BBOX[2]},{BBOX[3]}"
+               f"&datetime={date}T00:00:00Z/{date}T23:59:59Z&limit=20")
+        feats = json.load(urllib_request(api))["features"]
+        if not feats:
+            raise RuntimeError(f"STAC 未找到 {date} 的 S2 场景")
+        item = feats[0]
+        date_tag = date.replace("-", "")
+        bands, _, _, _ = _load_bands(item, date_tag)
+        B02,B03,B04,B05,B06,B08,B11,SCL = (bands['B02'],bands['B03'],bands['B04'],bands['B05'],
+                                           bands['B06'],bands['B08'],bands['B11'],bands['SCL'])
+        cloud_mask = np.isin(SCL, list(P.SCL_MASK)) if SCL.size else np.zeros(DST_SHAPE, bool)
+        valid = ~np.isnan(B04) & ~cloud_mask
+        meta = {"n_scenes":1, "dates":[item['properties']['datetime'][:10]],
+                "latest_date":item['properties']['datetime'][:10],
+                "latest_id":item['id'], "latest_cloud":float(item['properties']['eo:cloud_cover'])}
+    else:
+        comp, meta = _build_composite()
+        B02,B03,B04,B05,B06,B08,B11 = (comp['B02'],comp['B03'],comp['B04'],comp['B05'],
+                                       comp['B06'],comp['B08'],comp['B11'])
+        SCL = None
+        valid = ~np.isnan(B04)
+
+    scene_id   = meta["latest_id"]
+    scene_date = meta["latest_date"]
+    cloud      = meta["latest_cloud"]
+    print(f"[analyze] {scene_id} {scene_date} cloud={cloud:.1f}% | 合成 {meta['n_scenes']} 景 "
+          f"thr=NDCI{ndci_thr}/FAI{fai_thr}/MCI{mci_thr}/JRC{jrc_thr}")
+
+    # 2) 指数（与 GEE 参考版逐字一致）
+    MNDWI = (B03-B11)/(B03+B11+1e-6)
+    NDCI  = (B05-B04)/(B05+B04+1e-6)
+    f = (842.0-665.0)/(1610.0-665.0)
+    FAI = B08-(B04+(B11-B04)*f)
+    MCI = B05-B04-(B06-B04)*((705-665)/(740-665))
+
+    # 旧掩膜（对照）：单景模式用 MNDWI>0.10 & SCL==6；合成模式仅 MNDWI>0.10
+    if SCL is not None:
+        water_old = (MNDWI > P.MNDWI_THR) & valid & (SCL == 6)
+    else:
+        water_old = (MNDWI > P.MNDWI_THR) & valid
+
+    # 3) 水体掩膜 —— 与 GEE 参考版 GEE_S2_蓝藻_黄埭镇.py 逐字一致：
+    #     water = (MNDWI > 0.10) AND (JRC 历史水体频率 > 10%)
+    #     （GEE 用 JRC/GSW1_4 occurrence>10；本站用 GSW1_3 occurrence>=10，等价）
+    occ = P.get_jrc_occurrence(DST_TRANSFORM, DST_SHAPE, BBOX)
+    water_full = (MNDWI > P.MNDWI_THR) & (occ >= jrc_thr) & valid
+
+    # 形态学去噪（与本地验证管线一致：仅平滑椒盐噪声，不改变判定逻辑）
+    from scipy import ndimage
+    water_full = ndimage.binary_opening(water_full.astype(np.uint8), iterations=1).astype(bool)
+    water_full = ndimage.binary_closing(water_full.astype(np.uint8), iterations=1).astype(bool)
+    water_full = ndimage.binary_fill_holes(water_full)
+
+    # ★ 双 ROI：镇域精确多边形（默认显示） + 5km 缓冲区（GEE 对齐参考）
+    water_buf  = water_full & ROI_MASK    # GEE 语义：5km 圆形缓冲
+    water_town = water_full & BD_MASK      # 黄埭镇行政边界精确切出
+    clip_mask  = BD_MASK if roi in ("town", None) else ROI_MASK
+    water_new  = water_town if roi in ("town", None) else water_buf
+
+    # 3.2) 藻华 —— 与 GEE 参考版逐字一致：bloom = (NDCI>0.10) OR (FAI>0.005)（在 water 内）
+    #      （MCI 仅作辅助诊断，不参与 GEE 的 bloom 判定）
+    bloom_full   = water_full & ((NDCI > ndci_thr) | (FAI > fai_thr))
+    bloom_buf    = bloom_full & ROI_MASK
+    bloom_town   = bloom_full & BD_MASK
+    bloom        = bloom_town if roi in ("town", None) else bloom_buf
+    # GEE 头条"藻华面积"仅统计 NDCI>0.10 像元（与 GEE_S2 完全一致）
+    bloom_ndci_buf  = water_buf & (NDCI > ndci_thr)
+    bloom_ndci_town = water_town & (NDCI > ndci_thr)
+    bloom_ndci      = bloom_ndci_town if roi in ("town", None) else bloom_ndci_buf
+
+    # 3.5) 藻华检测 v2（Otsu 自适应阈值 + CMI 水生植物掩膜；替代旧伪标签 RF）
+    bloom_ml = bloom.copy()
+    bloom_prob = np.zeros(DST_SHAPE, dtype="float32")
+    if ML is not None:
+        try:
+            bloom_ml, bloom_prob = ML.detect(
+                B02, B03, B04, B05, B06, B08, B11, water_new)
+            bloom_ml &= clip_mask
+            bloom_prob *= clip_mask
+        except Exception as _e:
+            print("[ml] detect 失败，退回规则法:", _e)
+            bloom_ml = bloom.copy()
+
+    def ha(n): return n*TARGET_RES*TARGET_RES/1e4
+
+    # 4) 矢量化
+    water_fc, _ = P.vectorize_water(water_new, DST_TRANSFORM, tol_m=15.0)
+    bloom_fc = _vectorize_with_stats(bloom, DST_TRANSFORM, NDCI, tol_m=12.0)
+    bloom_ml_fc = _vectorize_with_stats(bloom_ml, DST_TRANSFORM, NDCI, tol_m=12.0)
+    json.dump(water_fc, open(os.path.join(OUT, "water.geojson"), "w"), ensure_ascii=False)
+    json.dump(bloom_fc, open(os.path.join(OUT, "bloom.geojson"), "w"), ensure_ascii=False)
+    json.dump(bloom_ml_fc, open(os.path.join(OUT, "bloom_ml.geojson"), "w"), ensure_ascii=False)
+
+    # 5) 渲染 PNG / JPEG —— 真彩用 JPEG 压缩(1.85MB->~300KB)，其余 PNG 开启 optimize
+    from PIL import Image as _PILImage
+    rgb = np.stack([B04, B03, B02], 0); rgb = np.clip(rgb, 0, 0.4)
+    rgb = np.nan_to_num(rgb, nan=0.0)   # 合成引入的 NaN(全云像元) 置黑，避免 cast 警告
+    rgb_s = np.transpose(P.stretch_truecolor(rgb), (1, 2, 0))
+    _PILImage.fromarray(rgb_s).save(os.path.join(OUT, "rgb.jpg"), "JPEG", quality=82, optimize=True)
+    for nm in ("bloom.png", "old.png", "water.png"):
+        fp = os.path.join(OUT, nm)
+        if os.path.exists(fp):
+            try:
+                im = _PILImage.open(fp); im.save(fp, optimize=True, compress_level=9)
+            except Exception as _e:
+                print("[optimize] skip", nm, _e)
+    ndci_fp = os.path.join(OUT, "ndci.png")
+    P.index_to_png(NDCI, water_new.astype(bool), P.NDCI_CMAP, -0.05, 0.15, ndci_fp)
+    # 转 WebP(带透明通道) 大幅减小体积，避免 600KB+ PNG 拖慢加载；PNG 保留作回退
+    try:
+        _im = _PILImage.open(ndci_fp).convert("RGBA")
+        _im.save(os.path.join(OUT, "ndci.webp"), "WEBP", quality=82, method=4)
+    except Exception as _e:
+        print("[ndci webp] keep png fallback:", _e)
+    P.bloom_to_png(bloom, os.path.join(OUT, "bloom.png"))
+    P.mask_to_png(water_old, [255, 60, 60], os.path.join(OUT, "old.png"), alpha=170)
+    P.mask_to_png(water_new, [30, 144, 255], os.path.join(OUT, "water.png"), alpha=150)
+
+    # 6.5) 写出带坐标的 GeoTIFF（供 XYZ 瓦片服务：放大锐利 + 超分上采样）
+    def _save_tif(a, name, dtype, count=1, nodata=None):
+        p = os.path.join(OUT, name)
+        with rasterio.open(p, "w", driver="GTiff", height=DST_SHAPE[0], width=DST_SHAPE[1],
+                           count=count, dtype=dtype, crs="EPSG:4326",
+                           transform=DST_TRANSFORM, nodata=nodata) as d:
+            if count == 1:
+                d.write(a.astype(dtype), 1)
+            else:
+                for i in range(count):
+                    d.write((a[:, :, i] if a.ndim == 3 else a).astype(dtype), i + 1)
+    rgb_clipped = rgb_s.copy(); rgb_clipped[~clip_mask] = 0   # 0 → 瓦片透明，底图服从显示 ROI
+    _save_tif(rgb_clipped, "rgb.tif", "uint8", 3)
+    ndci_disp = NDCI.astype("float32").copy(); ndci_disp[~clip_mask] = 0.0
+    _save_tif(ndci_disp, "ndci.tif", "float32", 1, nodata=0.0)
+    _save_tif((water_new & clip_mask).astype("uint8"), "water.tif", "uint8", 1, nodata=0)
+    _save_tif((bloom & clip_mask).astype("uint8"), "bloom.tif", "uint8", 1, nodata=0)
+    _save_tif((bloom_ml & clip_mask).astype("uint8"), "bloom_ml.tif", "uint8", 1, nodata=0)
+    _save_tif((bloom_prob * clip_mask).astype("float32"), "bloom_ml_prob.tif", "float32", 1, nodata=0.0)
+    _save_tif((water_old & clip_mask).astype("uint8"), "old.tif", "uint8", 1, nodata=0)
+    # 失效旧瓦片缓存（阈值/日期变化后旧瓦片已不准）
+    _td = os.path.join(OUT, "tiles")
+    if os.path.isdir(_td):
+        shutil.rmtree(_td)
+
+    # 6) 统计
+    n_old = int(water_old.sum()); n_new = int(water_new.sum())
+    n_bloom = int(bloom_ndci.sum())   # GEE 头条面积 = NDCI>0.10 像元数（与 GEE_S2 一致）
+    # GEE 对齐参考（5km 缓冲区，与 GEE clip(roi) 逐字一致）
+    gee_water = int(water_buf.sum()); gee_bloom = int(bloom_ndci_buf.sum())
+    wi = water_new
+    centroid = None
+    if wi.sum():
+        yy, xx = np.where(wi)
+        clat = float(np.mean([(DST_TRANSFORM*(0, int(r)))[1] for r in yy]))
+        clon = float(np.mean([(DST_TRANSFORM*(int(c), 0))[0] for c in xx]))
+        centroid = [round(clon, 5), round(clat, 5)]
+    ndci_w = NDCI[water_new]
+    result = {
+        "ready": True,
+        "scene_id": scene_id,
+        "date": scene_date,
+        "cloud": round(cloud, 1),
+        "n_scenes": meta["n_scenes"],
+        "scene_dates": meta["dates"],
+        "composite": date is None,
+        "roi": "huangdi_town" if roi in ("town", None) else "5km_buffer",
+        "bbox": [BBOX[0], BBOX[1], BBOX[2], BBOX[3]],
+        "water_ha": round(ha(n_new), 1),
+        "water_old_ha": round(ha(n_old), 1),
+        "water_gain_ha": round(ha(n_new - n_old), 1),
+        "bloom_ha": round(ha(n_bloom), 2),
+        "bloom_px": n_bloom,
+        "bloom_features": len(bloom_fc["features"]),
+        "bloom_ml_ha": round(ha(int(bloom_ml.sum())), 2),
+        "bloom_ml_px": int(bloom_ml.sum()),
+        "bloom_ml_features": len(bloom_ml_fc["features"]),
+        "ml_enabled": ML is not None,
+        "status": "预警" if (n_bloom and ha(n_bloom) >= P.BLOOM_AREA_HA) else "正常",
+        "centroid": centroid,
+        "in_boundary_ha": round(ha(int((water_new & BD_MASK).sum())), 1),
+        "in_boundary_pct": round(100*int((water_new & BD_MASK).sum())/max(n_new, 1), 1),
+        "gee_water_ha": round(ha(gee_water), 1),
+        "gee_bloom_ha": round(ha(gee_bloom), 2),
+        "ndci_p50": round(float(np.nanpercentile(ndci_w, 50)), 3) if n_new else None,
+        "ndci_p90": round(float(np.nanpercentile(ndci_w, 90)), 3) if n_new else None,
+        "ndci_max": round(float(np.nanmax(ndci_w)), 3) if n_new else None,
+        "fai_p50": round(float(np.nanpercentile(FAI[water_new], 50)), 4) if n_new else None,
+        "mci_p50": round(float(np.nanpercentile(MCI[water_new], 50)), 3) if n_new else None,
+        "thresholds": {"ndci": ndci_thr, "fai": fai_thr, "mci": mci_thr, "jrc": jrc_thr},
+        "rev": 0,
+    }
+    json.dump(result, open(os.path.join(OUT, "result.json"), "w"), ensure_ascii=False, indent=2)
+    # 写入版本号(=result.json 修改时间)，前端据此决定何时刷新缓存
+    result["rev"] = int(os.path.getmtime(os.path.join(OUT, "result.json")))
+    json.dump(result, open(os.path.join(OUT, "result.json"), "w"), ensure_ascii=False, indent=2)
+    print(f"[analyze] done: water={result['water_ha']}ha bloom={result['bloom_ha']}ha status={result['status']}")
+    return result
+
+def urllib_request(url):
+    import urllib.request
+    return urllib.request.urlopen(url, timeout=30)
+
+# =====================================================================
+# HTTP 服务
+# =====================================================================
+class Handler(BaseHTTPRequestHandler):
+    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+        if isinstance(body, (dict, list)):
+            body = json.dumps(body, ensure_ascii=False)
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        path = u.path
+        if path in ("/", "/index.html"):
+            return self._serve_file(os.path.join(STATIC, "index.html"), "text/html; charset=utf-8")
+        if path.startswith("/static/"):
+            return self._serve_file(os.path.join(HERE, path.lstrip("/")), self._ctype(path))
+        if path.startswith("/outputs/"):
+            return self._serve_file(os.path.join(HERE, path.lstrip("/")), self._ctype(path))
+        if path.startswith("/tiles/") or path.startswith("/tiles_gcj/"):
+            return self._serve_tile(path)
+        if path == "/api/status":
+            rp = os.path.join(OUT, "result.json")
+            if os.path.exists(rp):
+                return self._send(200, open(rp, encoding="utf-8").read())
+            return self._send(200, json.dumps({"ready": False}))
+        if path == "/api/analyze":
+            q = parse_qs(u.query)
+            def f(k, d):
+                try: return float(q.get(k, [d])[0])
+                except: return d
+            try:
+                res = analyze(ndci_thr=f("ndci", 0.10), fai_thr=f("fai", 0.005),
+                              mci_thr=f("mci", 0.005), jrc_thr=f("jrc", 10),
+                              date=q.get("date", [None])[0],
+                              roi=(q.get("roi", ["town"])[0] or "town"))
+                return self._send(200, res)
+            except Exception as e:
+                return self._send(500, {"error": str(e)})
+        return self._send(404, {"error": "not found"})
+
+    def _serve_file(self, fp, ctype):
+        if not os.path.exists(fp) or not os.path.isfile(fp):
+            return self._send(404, {"error": "file not found: " + fp})
+        with open(fp, "rb") as f:
+            data = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _ctype(self, p):
+        if p.endswith(".html"): return "text/html; charset=utf-8"
+        if p.endswith(".css"):  return "text/css; charset=utf-8"
+        if p.endswith(".js"):   return "application/javascript; charset=utf-8"
+        if p.endswith(".json"): return "application/json; charset=utf-8"
+        if p.endswith(".png"):  return "image/png"
+        if p.endswith(".jpg"):  return "image/jpeg"
+        if p.endswith(".webp"): return "image/webp"
+        if p.endswith(".geojson"): return "application/json; charset=utf-8"
+        return "application/octet-stream"
+
+    # ---------- XYZ 瓦片服务（B 方案：放大锐利 + 超分上采样） ----------
+    def _mercator_bounds(self, z, x, y):
+        n = 2 ** z
+        lon0 = x / n * 360 - 180
+        lon1 = (x + 1) / n * 360 - 180
+        def _lat(yy):
+            return math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * yy / n))))
+        return (_mx(lon0), _my(_lat(y + 1)), _mx(lon1), _my(_lat(y)))
+
+    def _transparent_tile(self):
+        from PIL import Image as _PILImage
+        import io as _io
+        im = _PILImage.new("RGBA", (256, 256), (0, 0, 0, 0))
+        b = _io.BytesIO(); im.save(b, "PNG"); return b.getvalue()
+
+    def _send_png(self, data):
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _prob_to_png(self, prob, water, fp):
+        """把 0~1 概率按 黄->橙->红 热图渲染（透明<0.3），带水体掩膜。"""
+        from PIL import Image as _PILImage
+        H, W = prob.shape
+        rgba = np.zeros((H, W, 4), dtype="uint8")
+        m = water & (prob > 0.3)
+        if m.sum() == 0:
+            _PILImage.fromarray(rgba, "RGBA").save(fp, "PNG", optimize=True)
+            return
+        t = np.clip((prob[m] - 0.3) / 0.7, 0, 1)          # 0.3->0, 1.0->1
+        r = np.interp(t, [0.0, 0.5, 1.0], [255, 255, 255]).astype("uint8")
+        g = np.interp(t, [0.0, 0.5, 1.0], [255, 140, 0]).astype("uint8")
+        b = np.interp(t, [0.0, 0.5, 1.0], [0, 0, 0]).astype("uint8")
+        rgba[m, 0], rgba[m, 1], rgba[m, 2] = r, g, b
+        rgba[m, 3] = 210
+        _PILImage.fromarray(rgba, "RGBA").save(fp, "PNG", optimize=True)
+
+    def _serve_tile(self, path):
+        # 支持 /tiles_gcj/<layer>/... 目录前缀（=高德 GCJ 纠偏瓦片；静态托管无法靠 query 区分）
+        m = re.match(r"/(tiles_gcj|tiles)/([a-z]+)/(\d+)/(\d+)/(\d+)\.png$", path)
+        if not m:
+            return self._send(404, {"error": "bad tile"})
+        layer, z, x, y = m.group(2), int(m.group(3)), int(m.group(4)), int(m.group(5))
+        gcj = (m.group(1) == "tiles_gcj") or \
+              parse_qs(urlparse(self.path).query).get("gcj", ["0"])[0] == "1"
+        mb = self._mercator_bounds(z, x, y)
+        # 相交判定：瓦片与 bbox 任意重叠即渲染（注意 mb[1]=瓦片北界, mb[3]=瓦片南界）
+        if not (mb[0] < BBOX_MERC[2] and mb[2] > BBOX_MERC[0]
+                and mb[1] > BBOX_MERC[1] and mb[3] < BBOX_MERC[3]):
+            return self._send_png(self._transparent_tile())
+        tag = "_gcj" if gcj else ""
+        tile_fp = os.path.join(OUT, "tiles", f"{layer}/{z}/{x}/{y}{tag}.png")
+        if os.path.exists(tile_fp):
+            return self._serve_file(tile_fp, "image/png")
+        os.makedirs(os.path.dirname(tile_fp), exist_ok=True)
+        try:
+            self._gen_tile(layer, z, x, y, mb, gcj, tile_fp)
+        except Exception as e:
+            print("[tile] gen fail", layer, z, x, y, repr(e))
+            try:
+                open("/tmp/tile_err.log", "a").write("ERR %s %d/%d/%d: %r\n" % (layer, z, x, y, e))
+            except Exception:
+                pass
+            return self._send_png(self._transparent_tile())
+        return self._serve_file(tile_fp, "image/png")
+
+    def _gen_tile(self, layer, z, x, y, mb, gcj, tile_fp):
+        from rasterio.warp import reproject, Resampling
+        dt = P.fb(*mb, 256, 256)
+        if gcj:
+            st = P.fb(BBOX[0] + GCJ_DLON, BBOX[1] + GCJ_DLAT,
+                      BBOX[2] + GCJ_DLON, BBOX[3] + GCJ_DLAT, NCOL, NROW)
+        else:
+            st = DST_TRANSFORM
+        RW = dict(src_transform=st, src_crs="EPSG:4326", dst_transform=dt, dst_crs="EPSG:3857")
+        if layer == "rgb":
+            with rasterio.open(os.path.join(OUT, "rgb.tif")) as s:
+                src = s.read()
+            dst = np.zeros((3, 256, 256), dtype="uint8")
+            reproject(src, dst, resampling=Resampling.bilinear, **RW)
+            mask = ((dst.sum(0)) > 0).astype("uint8") * 255
+            from PIL import Image as _PILImage
+            _PILImage.fromarray(np.dstack([dst[0], dst[1], dst[2], mask]), "RGBA").save(tile_fp, "PNG", optimize=True)
+        elif layer == "ndci":
+            with rasterio.open(os.path.join(OUT, "ndci.tif")) as s:
+                nd = s.read(1)
+            with rasterio.open(os.path.join(OUT, "water.tif")) as s2:
+                wt = s2.read(1)
+            dst_nd = np.zeros((256, 256), dtype="float32")
+            dst_wt = np.zeros((256, 256), dtype="uint8")
+            reproject(nd, dst_nd, resampling=Resampling.bilinear, **RW)
+            reproject(wt, dst_wt, resampling=Resampling.nearest, **RW)
+            P.index_to_png(dst_nd, dst_wt.astype(bool), P.NDCI_CMAP, -0.05, 0.15, tile_fp)
+        elif layer in ("water", "old"):
+            with rasterio.open(os.path.join(OUT, layer + ".tif")) as s:
+                src = s.read(1)
+            dst = np.zeros((256, 256), dtype="uint8")
+            reproject(src, dst, resampling=Resampling.nearest, **RW)
+            col = [30, 144, 255] if layer == "water" else [255, 60, 60]
+            al = 150 if layer == "water" else 170
+            P.mask_to_png(dst.astype(bool), col, tile_fp, alpha=al)
+        elif layer == "bloom":
+            with rasterio.open(os.path.join(OUT, "bloom.tif")) as s:
+                src = s.read(1)
+            dst = np.zeros((256, 256), dtype="uint8")
+            reproject(src, dst, resampling=Resampling.nearest, **RW)
+            P.bloom_to_png(dst.astype(bool), tile_fp)
+        elif layer == "bloomml":
+            with rasterio.open(os.path.join(OUT, "bloom_ml.tif")) as s:
+                src = s.read(1)
+            dst = np.zeros((256, 256), dtype="uint8")
+            reproject(src, dst, resampling=Resampling.nearest, **RW)
+            P.bloom_to_png(dst.astype(bool), tile_fp)
+        elif layer == "bloommlp":
+            with rasterio.open(os.path.join(OUT, "bloom_ml_prob.tif")) as s:
+                pr = s.read(1)
+            with rasterio.open(os.path.join(OUT, "water.tif")) as s2:
+                wt = s2.read(1)
+            dst_p = np.zeros((256, 256), dtype="float32")
+            dst_w = np.zeros((256, 256), dtype="uint8")
+            reproject(pr, dst_p, resampling=Resampling.bilinear, **RW)
+            reproject(wt, dst_w, resampling=Resampling.nearest, **RW)
+            self._prob_to_png(dst_p, dst_w.astype(bool), tile_fp)
+        else:
+            raise ValueError("unknown layer " + layer)
+
+    def log_message(self, *a):
+        pass  # 静默
+
+def main():
+    port = int(os.environ.get("PORT", "8000"))
+    # 启动时预生成一次分析结果（波段已缓存，约十几秒）
+    try:
+        if not os.path.exists(os.path.join(OUT, "result.json")):
+            print("[startup] 预生成分析结果 ...")
+            analyze()
+    except Exception as e:
+        print("[startup] 预生成失败(可稍后在页面点击重新分析):", e)
+    srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    print(f"[server] http://localhost:{port}")
+    srv.serve_forever()
+
+if __name__ == "__main__":
+    main()

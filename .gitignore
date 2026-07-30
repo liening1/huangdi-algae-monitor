@@ -1,0 +1,15 @@
+# 白名单策略：默认全忽略（仅顶层），只放行网站运行/构建所需文件
+# （本目录含 17GB+ 卫星原始数据，绝不能进仓库）
+/*
+!.gitignore
+!.github/
+!web/
+web/outputs/
+!S2_水体边界_黄埭镇.py
+!bloom_ml.py
+!build_static.py
+!requirements_build.txt
+!黄埭镇边界.json
+__pycache__/
+*.pyc
+.DS_Store

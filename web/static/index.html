@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<title>黄埭镇蓝藻卫星监测系统 · Sentinel-2</title>
+<link rel="stylesheet" href="static/vendor/leaflet/leaflet.css"/>
+<link rel="stylesheet" href="static/style.css"/>
+</head>
+<body>
+
+<!-- 极光弥散背景 -->
+<div class="aurora" aria-hidden="true">
+  <span class="orb orb-a"></span>
+  <span class="orb orb-b"></span>
+  <span class="orb orb-c"></span>
+</div>
+
+<!-- 顶部导航 -->
+<nav class="nav" id="nav">
+  <div class="nav-inner">
+    <a class="nav-brand" href="#top">
+      <svg class="mark" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        <path d="M12 2C7 2 3 6 3 11c0 6.1 8.1 10.7 8.4 10.9.2.1.5.1.7 0C12.9 21.7 21 17.1 21 11c0-5-4-9-9-9z" fill="none" stroke="currentColor" stroke-width="1.6"/>
+        <path d="M7.5 12.2c1.6-1.1 3.2-1.1 4.8 0 1.5 1 3.1 1 4.7-.1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M7.5 15.6c1.6-1.1 3.2-1.1 4.8 0 1.5 1 3.1 1 4.7-.1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <span>蓝藻监测</span>
+      <span class="live"><i></i>实时</span>
+    </a>
+    <div class="nav-links">
+      <a href="#map">监测地图</a>
+      <a href="#method">技术原理</a>
+      <a href="#compare">传感器对比</a>
+    </div>
+    <div class="nav-meta" id="nav-meta">数据：加载中…</div>
+  </div>
+</nav>
+
+<!-- Hero -->
+<header class="hero" id="top">
+  <div class="hero-content">
+    <p class="hero-eyebrow">SENTINEL-2 · 10M 多光谱</p>
+    <h1 class="hero-title">黄埭镇蓝藻<br/><em>卫星监测系统</em></h1>
+    <p class="hero-sub">以哨兵二号多光谱影像精修每一米水体边界，<br class="br-pc"/>多指数联合判定蓝藻，机器学习复核。看得清，才判得准。</p>
+    <div class="hero-ctas">
+      <a class="btn btn-primary" href="#map">进入监测地图</a>
+      <a class="btn btn-ghost" href="#method">了解技术原理<span class="chev">›</span></a>
+    </div>
+  </div>
+  <div class="scroll-cue" aria-hidden="true"><span></span></div>
+</header>
+
+<!-- 数据概览（Bento） -->
+<section class="stats" id="stats">
+  <div class="stat-card reveal">
+    <div class="stat-label">水体面积</div>
+    <div class="stat-value" id="s-water">—</div>
+    <div class="stat-unit">公顷</div>
+  </div>
+  <div class="stat-card reveal">
+    <div class="stat-label">蓝藻面积</div>
+    <div class="stat-value accent-bloom" id="s-bloom">—</div>
+    <div class="stat-unit">公顷</div>
+  </div>
+  <div class="stat-card reveal">
+    <div class="stat-label">监测状态</div>
+    <div class="stat-value" id="s-status">—</div>
+    <div class="stat-unit" id="s-status-sub">实时判定</div>
+  </div>
+  <div class="stat-card reveal">
+    <div class="stat-label">影像日期</div>
+    <div class="stat-value" id="s-date">—</div>
+    <div class="stat-unit" id="s-cloud">云量 —</div>
+  </div>
+</section>
+
+<!-- 交互地图 -->
+<section class="section" id="map">
+  <div class="section-head reveal">
+    <p class="kicker">INTERACTIVE MAP</p>
+    <h2>交互式监测地图</h2>
+    <p>拖动、缩放查看黄埭镇 10 米级水体与蓝藻分布。右上角浮窗控制图层与参数。</p>
+  </div>
+  <div class="map-shell reveal">
+    <div class="map-wrap">
+      <div id="leaflet"></div>
+      <div class="map-loading" id="map-loading"><div class="spinner"></div><span>正在加载影像…</span></div>
+
+      <aside class="panel">
+        <div class="panel-block">
+          <div class="panel-title">底图</div>
+          <select id="basemap" class="basemap-select">
+            <option value="esri">Esri 卫星影像</option>
+            <option value="gaode">高德卫星（国内更快）</option>
+            <option value="osm">OpenStreetMap</option>
+          </select>
+        </div>
+        <div class="panel-block">
+          <div class="panel-title">图层</div>
+          <label class="switch"><input type="checkbox" data-layer="rgb" checked><span class="track"></span><span class="lbl">真彩底图 (10m)</span></label>
+          <label class="switch"><input type="checkbox" data-layer="ndci"><span class="track"></span><span class="lbl">NDCI 叶绿素</span></label>
+          <label class="switch"><input type="checkbox" data-layer="bloom" checked><span class="track"></span><span class="lbl">蓝藻藻华 (规则法)</span></label>
+          <label class="switch"><input type="checkbox" data-layer="bloomml"><span class="track"></span><span class="lbl">ML 藻华检测 (Otsu+CMI)</span></label>
+          <label class="switch"><input type="checkbox" data-layer="bloommlp"><span class="track"></span><span class="lbl">ML 置信度热图</span></label>
+          <label class="switch"><input type="checkbox" data-layer="water" checked><span class="track"></span><span class="lbl">精修水体边界</span></label>
+          <label class="switch"><input type="checkbox" data-layer="old"><span class="track"></span><span class="lbl">旧掩膜对照</span></label>
+          <label class="switch"><input type="checkbox" data-layer="boundary" checked><span class="track"></span><span class="lbl">行政边界 (权威)</span></label>
+        </div>
+        <div class="panel-block">
+          <div class="panel-title">NDCI 藻华阈值</div>
+          <div class="slider-row">
+            <input type="range" id="ndci-slider" min="0" max="0.4" step="0.01" value="0.10"/>
+            <span class="slider-val" id="ndci-val">0.10</span>
+          </div>
+          <div class="hint">仅显示 NDCI 均值 ≥ 阈值的藻华斑块</div>
+          <div class="mini-stat">当前藻华：<b id="bloom-filtered">—</b> 公顷</div>
+          <div class="mini-stat">ML 藻华：<b id="bloomml-area">—</b> 公顷</div>
+        </div>
+        <div class="panel-block">
+          <div class="panel-title">影像模式</div>
+          <select id="mode" class="basemap-select">
+            <option value="composite">合成（45天 median）</option>
+            <option value="2026-07-26">单景 2026-07-26（最新）</option>
+            <option value="2026-07-21">单景 2026-07-21（峰值）</option>
+            <option value="2026-06-26">单景 2026-06-26</option>
+          </select>
+          <div class="hint" id="mode-hint">默认 45 天多景合成；可切换为任意单景查看当日实况。</div>
+        </div>
+        <div class="panel-block">
+          <div class="panel-title">显示范围</div>
+          <select id="roi" class="basemap-select">
+            <option value="town">黄埭镇行政边界（精确切出）</option>
+            <option value="gee">5km 缓冲区（GEE 对齐）</option>
+          </select>
+          <div class="hint" id="roi-hint">默认精确切出黄埭镇多边形；切到 5km 缓冲区即与 GEE 数字逐字对齐（圆形）。</div>
+        </div>
+        <div class="panel-block">
+          <button class="btn-primary" id="btn-rerun">重新分析</button>
+          <div class="hint" id="rerun-hint">默认 45 天合成；可切换影像模式与显示范围、阈值。</div>
+        </div>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<!-- 技术原理 -->
+<section class="section soft" id="method">
+  <div class="section-head reveal">
+    <p class="kicker">METHODOLOGY</p>
+    <h2>技术原理</h2>
+    <p>把"像 Google 一样干净"的水体边界，拆成可解释、可复现的四步。</p>
+  </div>
+  <div class="grid">
+    <div class="card reveal">
+      <div class="card-ico">
+        <svg viewBox="0 0 32 32" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 20l-4.5 4.5M24 20l4.5 4.5M8 12l-4.5-4.5M24 12l4.5-4.5"/><rect x="12" y="12" width="8" height="8" rx="2"/><path d="M16 3v4M16 25v4"/></svg>
+      </div>
+      <h3>哨兵二号采集</h3>
+      <p>Sentinel-2 MSI L2A 地表反射率，10m 红/绿/蓝/近红外 + 20m 红边与短波红外，正是蓝藻指数所需的波段组合。</p>
+    </div>
+    <div class="card reveal">
+      <div class="card-ico">
+        <svg viewBox="0 0 32 32" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M3 14c2.5-2 5-2 7.5 0s5 2 7.5 0 5-2 7.5 0M3 21c2.5-2 5-2 7.5 0s5 2 7.5 0 5-2 7.5 0M3 7c2.5-2 5-2 7.5 0s5 2 7.5 0 5-2 7.5 0"/></svg>
+      </div>
+      <h3>JRC 参考 + S2 细化</h3>
+      <p>以 JRC 全球水体多年频率（≥10%）为稳定参考，再用 S2 的 MNDWI 在 10m 上细化边界，形态学去噪后矢量化简。</p>
+    </div>
+    <div class="card reveal">
+      <div class="card-ico">
+        <svg viewBox="0 0 32 32" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3h6M15 3v8l-8.2 13.2A2.4 2.4 0 0 0 8.9 27h14.2a2.4 2.4 0 0 0 2.1-2.8L17 11V3"/><path d="M11 20h10"/></svg>
+      </div>
+      <h3>多指数联合判定</h3>
+      <p>蓝藻需 NDCI、FAI、MCI <b>三者同时</b>超阈才判定，避免单层指数在浑浊养殖塘上的过拟合误报。</p>
+    </div>
+    <div class="card reveal">
+      <div class="card-ico">
+        <svg viewBox="0 0 32 32" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3l10 4v8c0 6.5-4.3 10.9-10 13-5.7-2.1-10-6.5-10-13V7z"/><path d="M11.5 15.5l3 3 6-6"/></svg>
+      </div>
+      <h3>权威边界核验</h3>
+      <p>检测结果与 OSM 行政边界（relation 7763011）做定位核验，水体质心须落在镇域内，确保"范围不错"。</p>
+    </div>
+    <div class="card card-wide reveal">
+      <div class="card-ico">
+        <svg viewBox="0 0 32 32" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="16" height="16" rx="3"/><path d="M16 2v3M16 27v3M2 16h3M27 16h3M7 5.5L9 7M25 5.5L23 7M7 26.5L9 25M25 26.5L23 25"/><circle cx="16" cy="16" r="3"/></svg>
+      </div>
+      <h3>机器学习复核</h3>
+      <p>在规则法之外，采用 <b>Otsu 自适应阈值</b>（对水体内 NDCI/FAI 自动定分割点，比固定阈值更稳健）+ <b>CMI 指数</b>（Liang 2017，依据藻蓝蛋白吸收区分蓝藻与挺水植物），输出藻华<b>概率图</b>，显著减少水草误判。方法引自 Mishra &amp; Mishra 2012、Hu 2009、Liang 2017 等期刊验证算法。</p>
+    </div>
+  </div>
+</section>
+
+<!-- 传感器对比 -->
+<section class="section" id="compare">
+  <div class="section-head reveal">
+    <p class="kicker">SENSOR COMPARISON</p>
+    <h2>传感器对比：为何回退到哨兵二号</h2>
+    <p>风云系列擅长逐时预警，但缺少蓝藻所需的红边 / 短波红外波段，且分辨率太粗；哨兵二号才是精细检测主力。</p>
+  </div>
+  <div class="table-wrap reveal">
+    <table class="cmp">
+      <thead>
+        <tr><th>维度</th><th>风云二号 FY-2</th><th>风云四号B FY-4B</th><th class="hl">哨兵二号 S2</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>轨道 / 重访</td><td>静止 · 15–30 分钟</td><td>静止 · 分钟级</td><td class="hl">极轨 · 2–5 天</td></tr>
+        <tr><td>波段数</td><td>5（无红边/蓝）</td><td>14</td><td class="hl">13（含红边/SWIR）</td></tr>
+        <tr><td>空间分辨率</td><td>1.25–5 km</td><td>0.5–4 km</td><td class="hl">10 / 20 m</td></tr>
+        <tr><td>红边 705/740nm</td><td>✗</td><td>✗</td><td class="hl">✓</td></tr>
+        <tr><td>短波红外 1610nm</td><td>✗</td><td>部分</td><td class="hl">✓（MNDWI/FAI）</td></tr>
+        <tr><td>蓝藻指数</td><td>算不了</td><td>做不了精细</td><td class="hl">NDCI/FAI/MCI 全可</td></tr>
+        <tr><td>角色定位</td><td>天气预警</td><td>逐时预警补充</td><td class="hl">精细检测主力</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="footer-brand">黄埭镇蓝藻卫星监测系统</div>
+  <div class="muted">数据源：Copernicus Sentinel-2 / JRC Global Surface Water / OpenStreetMap · 底图 © 高德 AutoNavi / Esri</div>
+</footer>
+
+<script src="static/vendor/leaflet/leaflet.js"></script>
+<script src="static/app.js"></script>
+</body>
+</html>

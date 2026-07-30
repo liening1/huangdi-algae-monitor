@@ -1,0 +1,7 @@
+numpy
+scipy
+shapely
+rasterio
+pillow
+folium
+requests

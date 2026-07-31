@@ -15,7 +15,11 @@ build_static.py — 把动态网站"固化"为纯静态站点（GitHub Pages 可
        .nojekyll （关闭 Pages 的 Jekyll 处理）
 
 本地（macOS）用法：
-  PYTHONPATH=/tmp/pylibs /usr/bin/python3 build_static.py
+  依赖已固化到项目内 venv（系统 python3.9.6 构建，h5py/rasterio 均按 3.9 编译）：
+    /usr/bin/python3 -m venv venv
+    venv/bin/python -m pip install numpy scipy shapely rasterio pillow folium requests tifffile h5py
+    venv/bin/python build_static.py
+  （旧方案 PYTHONPATH=/tmp/pylibs 易因系统清理丢失纯 python 文件，已弃用）
 GitHub Actions（ubuntu）用法：
   python3 build_static.py        # 依赖见 requirements_build.txt
 """

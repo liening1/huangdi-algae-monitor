@@ -13,3 +13,7 @@ web/outputs/
 __pycache__/
 *.pyc
 .DS_Store
+# 项目内 venv（本地构建依赖，已由环境隔离，禁止进仓库；CI 走 requirements_build.txt）
+venv/
+.venv/
+*.egg-info/

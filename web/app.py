@@ -552,8 +552,8 @@ def _prob_to_png(prob, water, fp):
     _PILImage.fromarray(rgba, "RGBA").save(fp, "PNG", optimize=True)
 
     def _serve_tile(self, path):
-        # 支持 /tiles[/_gcj]/<comboKey>/<layer>/z/x/y.png
-        m = re.match(r"/(tiles_gcj|tiles)/([A-Za-z0-9_-]+)/([a-z]+)/(\d+)/(\d+)/(\d+)\.png$", path)
+        # 支持 /tiles[/_gcj]/<comboKey>/<layer>/z/x/y.{png|webp}
+        m = re.match(r"/(tiles_gcj|tiles)/([A-Za-z0-9_-]+)/([a-z]+)/(\d+)/(\d+)/(\d+)\.(png|webp)$", path)
         if not m:
             return self._send(404, {"error": "bad tile"})
         prefix, combo_key, layer, z, x, y = (m.group(1), m.group(2), m.group(3),
@@ -574,7 +574,8 @@ def _prob_to_png(prob, water, fp):
             except Exception:
                 pass
             return self._send_png(self._transparent_tile())
-        return self._serve_file(tile_fp, "image/png")
+        ctype = "image/webp" if tile_fp.endswith(".webp") else "image/png"
+        return self._serve_file(tile_fp, ctype)
 
     def log_message(self, *a):
         pass  # 静默
@@ -612,7 +613,8 @@ def render_combo_tile(combo, layer, z, x, y, gcj, tiles_root):
     sub = "tiles_gcj" if gcj else "tiles"
     out_dir = os.path.join(tiles_root, sub, combo["key"], layer, str(z), str(x))
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, str(y) + ".png")
+    ext = ".webp" if layer == "rgb" else ".png"   # RGB 用 WebP(4x 小)，其余 PNG
+    out_path = os.path.join(out_dir, str(y) + ext)
     if os.path.exists(out_path):
         return out_path
     n = 2 ** z
@@ -633,7 +635,7 @@ def render_combo_tile(combo, layer, z, x, y, gcj, tiles_root):
         reproject(src, dst, resampling=Resampling.bilinear, **RW)
         # 有数据的区域不透明显示真彩；无数据区域透明露出底图（避免黑块）
         mask = ((dst.sum(0)) > 0).astype("uint8") * 255
-        _PILImage.fromarray(np.dstack([dst[0], dst[1], dst[2], mask]), "RGBA").save(out_path, "PNG", optimize=True)
+        _PILImage.fromarray(np.dstack([dst[0], dst[1], dst[2], mask]), "RGBA").save(out_path, "WEBP", quality=78, method=4)
     elif layer == "ndci":
         nd = combo["ndci"].astype("float32")
         wt = combo["water"].astype("uint8")

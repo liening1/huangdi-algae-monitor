@@ -227,7 +227,7 @@ function buildLayers() {
   const wb = (result && result.bbox) || DEFAULT_BBOX;
   // 目录式 GCJ 变体（静态服务器忽略 query，故用目录区分）：高德底图用 tiles_gcj/，其余用 tiles/
   const tBase = (BASEMAP === "gaode" ? "tiles_gcj/" : "tiles/");
-  const tUrl = (n) => tBase + COMBO + "/" + n + "/{z}/{x}/{y}.png?v=" + REV;
+  const tUrl = (n) => tBase + COMBO + "/" + n + "/{z}/{x}/{y}" + (n === "rgb" ? ".webp" : ".png") + "?v=" + REV;
   const tOpt = { bounds: [[wb[1], wb[0]], [wb[3], wb[2]]], noWrap: true, minZoom: 10, maxZoom: 17, keepBuffer: 2 };
   layers.rgb  = L.tileLayer(tUrl("rgb"),  Object.assign({ opacity: 1.0,  zIndex: 10 }, tOpt));
   layers.ndci = L.tileLayer(tUrl("ndci"), Object.assign({ opacity: 0.7,  zIndex: 30 }, tOpt));

@@ -200,7 +200,7 @@ def step_assemble():
             continue
         for root, _d, files in os.walk(src):
             for f in files:
-                if not f.endswith(".png"):
+                if not (f.endswith(".png") or f.endswith(".webp")):
                     continue
                 rel = os.path.relpath(root, src)
                 dst = os.path.join(DIST, sub, rel, f)

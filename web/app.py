@@ -164,8 +164,16 @@ STAC_BASE = "https://earth-search.aws.element84.com/v1/collections/sentinel-2-l2
 def _query_stac(start, end):
     api = (STAC_BASE + f"?bbox={BBOX[0]},{BBOX[1]},{BBOX[2]},{BBOX[3]}"
            f"&datetime={start}T00:00:00Z/{end}T23:59:59Z&limit=100")
-    feats = json.load(urllib_request(api))["features"]
-    return [f for f in feats if float(f["properties"]["eo:cloud_cover"]) < 60]
+    for attempt in range(4):
+        try:
+            feats = json.load(urllib_request(api))["features"]
+            return [f for f in feats if float(f["properties"]["eo:cloud_cover"]) < 60]
+        except Exception as e:
+            if "429" in str(e) and attempt < 3:
+                wait = 10 * (attempt + 1)
+                print(f"  [stac retry {attempt+1}/4] 429 限流，等待 {wait}s...")
+                time.sleep(wait); continue
+            raise
 
 _COMPOSITE_CACHE = {}   # (start,end) -> (comp, meta)，避免多 ROI 重复拉取合成
 
@@ -281,7 +289,14 @@ def compute(date=None, roi="town"):
     if date:
         api = (STAC_BASE + f"?bbox={BBOX[0]},{BBOX[1]},{BBOX[2]},{BBOX[3]}"
                f"&datetime={date}T00:00:00Z/{date}T23:59:59Z&limit=20")
-        feats = json.load(urllib_request(api))["features"]
+        for _att in range(4):
+            try:
+                feats = json.load(urllib_request(api))["features"]
+                break
+            except Exception as e:
+                if "429" in str(e) and _att < 3:
+                    time.sleep(10 * (_att + 1)); continue
+                raise
         if not feats:
             raise RuntimeError(f"STAC 未找到 {date} 的 S2 场景")
         item = feats[0]

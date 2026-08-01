@@ -88,11 +88,21 @@ def step_build_combos():
     for (date, roi) in combos:
         key = A.combo_key_of(date, roi)
         print(f"[build]   ▶ {key} ...", flush=True)
-        try:
-            combo = A.compute(date, roi)
-        except Exception as e:
-            print(f"[build]     ✗ compute 失败，跳过: {e}", flush=True)
+        combo = None
+        for attempt in range(3):
+            try:
+                combo = A.compute(date, roi)
+                break
+            except Exception as e:
+                if attempt < 2:
+                    wait = 20 * (attempt + 1)
+                    print(f"[build]     ✗ 失败({e})，{wait}s 后重试...", flush=True)
+                    import time; time.sleep(wait)
+                else:
+                    print(f"[build]     ✗ compute 最终失败，跳过: {e}", flush=True)
+        if combo is None:
             continue
+        import time; time.sleep(2)  # 组合间间隔，避免 STAC/API 限流
         stats = combo["stats"]
         # 每组合独立输出目录
         cdir = os.path.join(OUT, "combos", key)

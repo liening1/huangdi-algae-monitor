@@ -15,7 +15,7 @@
   PYTHONPATH=/tmp/pylibs GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR CPL_VSIL_CURL_USE_HEAD=NO \
       /usr/bin/python3 web/app.py
 """
-import importlib.util, os, json, math, base64, io, sys, re, shutil
+import importlib.util, os, json, math, base64, io, sys, re, shutil, time
 import rasterio
 from rasterio.features import rasterize as _rasterize
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -96,6 +96,9 @@ BD_GEOM = _town_geom()
 BD_MASK = _rasterize([(BD_GEOM, 1)], out_shape=DST_SHAPE, transform=DST_TRANSFORM, fill=0).astype(bool)
 BD_AREA_HA = round(float(BD_MASK.sum()) * TARGET_RES * TARGET_RES / 1e4, 1)  # 镇域面积约 49 km²
 
+# 多组合瓦片：按 comboKey 缓存已计算的 combo（开发服务器按需渲染 / 静态构建复用）
+COMBOS = {}
+
 _RM = 6378137.0
 def _mx(lon): return math.radians(lon) * _RM
 def _my(lat): return math.log(math.tan(math.pi/4 + math.radians(lat)/2)) * _RM
@@ -164,6 +167,8 @@ def _query_stac(start, end):
     feats = json.load(urllib_request(api))["features"]
     return [f for f in feats if float(f["properties"]["eo:cloud_cover"]) < 60]
 
+_COMPOSITE_CACHE = {}   # (start,end) -> (comp, meta)，避免多 ROI 重复拉取合成
+
 def _build_composite():
     """45 天窗口内多景 median 合成（GEE: s2.median().clip(roi)）。
     逐景用 SCL 做云掩膜（清晰像元 = 非 SCL_MASK = {4,5,6,7}），再对所有景做
@@ -172,6 +177,8 @@ def _build_composite():
     now = _dt.datetime.now(_dt.timezone.utc)
     start = (now - _dt.timedelta(days=45)).strftime('%Y-%m-%d')
     end = now.strftime('%Y-%m-%d')
+    if (start, end) in _COMPOSITE_CACHE:
+        return _COMPOSITE_CACHE[(start, end)]
     feats = _query_stac(start, end)
     extra = 0
     while len(feats) < 3 and extra <= 90:      # GEE MIN_SCENES = 3
@@ -215,6 +222,7 @@ def _build_composite():
         "latest_id": latest["id"],
         "latest_cloud": float(latest["properties"]["eo:cloud_cover"]),
     }
+    _COMPOSITE_CACHE[(start, end)] = (comp, meta)
     return comp, meta
 
 def _vectorize_with_stats(mask, dst_transform, arr, tol_m=15.0):
@@ -248,12 +256,17 @@ def _vectorize_with_stats(mask, dst_transform, arr, tol_m=15.0):
             })
     return {"type": "FeatureCollection", "features": feats}
 
-def analyze(ndci_thr=0.10, fai_thr=0.005, mci_thr=0.005, jrc_thr=10, date=None, roi="town"):
-    """运行完整流水线（与 GEE 参考版 GEE_S2_蓝藻_黄埭镇.py 完全一致）：
-    45 天 median 合成 + MNDWI>0.10&JRC>10 水体 + NDCI>0.10 OR FAI>0.005 藻华。
-    date= 时退化为单景调试模式。
-    roi= "town"  → 显示/统计精确裁剪到黄埭镇行政边界（默认，直观）；
-         "gee"   → 沿用 GEE 的 5km 缓冲区圆形 ROI（与 GEE 数字逐字对齐）。"""
+def combo_key_of(date, roi):
+    """组合键：composite_town / composite_gee / 2026-07-21_town ..."""
+    base = "composite" if date is None else date
+    return base + "_" + ("town" if roi in ("town", None) else "gee")
+
+
+def compute(date=None, roi="town"):
+    """运行完整流水线，返回 combo 字典（含渲染用数组 + 统计），不写文件。
+    与 GEE 参考版逐字一致；roi 仅影响裁剪/统计，不影响波段与指数。
+    阈值固定为站点的默认阈值（NDCI0.10 / FAI0.005 / MCI0.005 / JRC10），与静态站一致。"""
+    ndci_thr, fai_thr, mci_thr, jrc_thr = 0.10, 0.005, 0.005, 10
     # 1) 场景选择：默认 45 天 median 合成；date= 时单景
     if date:
         api = (STAC_BASE + f"?bbox={BBOX[0]},{BBOX[1]},{BBOX[2]},{BBOX[3]}"
@@ -281,8 +294,8 @@ def analyze(ndci_thr=0.10, fai_thr=0.005, mci_thr=0.005, jrc_thr=10, date=None, 
     scene_id   = meta["latest_id"]
     scene_date = meta["latest_date"]
     cloud      = meta["latest_cloud"]
-    print(f"[analyze] {scene_id} {scene_date} cloud={cloud:.1f}% | 合成 {meta['n_scenes']} 景 "
-          f"thr=NDCI{ndci_thr}/FAI{fai_thr}/MCI{mci_thr}/JRC{jrc_thr}")
+    print(f"[compute] {scene_id} {scene_date} cloud={cloud:.1f}% | 合成 {meta['n_scenes']} 景 "
+          f"roi={roi}")
 
     # 2) 指数（与 GEE 参考版逐字一致）
     MNDWI = (B03-B11)/(B03+B11+1e-6)
@@ -297,42 +310,29 @@ def analyze(ndci_thr=0.10, fai_thr=0.005, mci_thr=0.005, jrc_thr=10, date=None, 
     else:
         water_old = (MNDWI > P.MNDWI_THR) & valid
 
-    # 3) 水体掩膜 —— 与 GEE 参考版 GEE_S2_蓝藻_黄埭镇.py 逐字一致：
-    #     water = (MNDWI > 0.10) AND (JRC 历史水体频率 > 10%)
-    #     （GEE 用 JRC/GSW1_4 occurrence>10；本站用 GSW1_3 occurrence>=10，等价）
+    # 3) 水体掩膜
     occ = P.get_jrc_occurrence(DST_TRANSFORM, DST_SHAPE, BBOX)
     water_full = (MNDWI > P.MNDWI_THR) & (occ >= jrc_thr) & valid
 
-    # 形态学去噪（与本地验证管线一致：仅平滑椒盐噪声，不改变判定逻辑）
     from scipy import ndimage
     water_full = ndimage.binary_opening(water_full.astype(np.uint8), iterations=1).astype(bool)
     water_full = ndimage.binary_closing(water_full.astype(np.uint8), iterations=1).astype(bool)
     water_full = ndimage.binary_fill_holes(water_full)
 
-    # ★ 双 ROI：镇域精确多边形（默认显示） + 5km 缓冲区（GEE 对齐参考）
-    water_buf  = water_full & ROI_MASK    # GEE 语义：5km 圆形缓冲
-    water_town = water_full & BD_MASK      # 黄埭镇行政边界精确切出
     clip_mask  = BD_MASK if roi in ("town", None) else ROI_MASK
-    water_new  = water_town if roi in ("town", None) else water_buf
+    water_new  = (water_full & BD_MASK) if roi in ("town", None) else (water_full & ROI_MASK)
 
-    # 3.2) 藻华 —— 与 GEE 参考版逐字一致：bloom = (NDCI>0.10) OR (FAI>0.005)（在 water 内）
-    #      （MCI 仅作辅助诊断，不参与 GEE 的 bloom 判定）
+    # 3.2) 藻华
     bloom_full   = water_full & ((NDCI > ndci_thr) | (FAI > fai_thr))
-    bloom_buf    = bloom_full & ROI_MASK
-    bloom_town   = bloom_full & BD_MASK
-    bloom        = bloom_town if roi in ("town", None) else bloom_buf
-    # GEE 头条"藻华面积"仅统计 NDCI>0.10 像元（与 GEE_S2 完全一致）
-    bloom_ndci_buf  = water_buf & (NDCI > ndci_thr)
-    bloom_ndci_town = water_town & (NDCI > ndci_thr)
-    bloom_ndci      = bloom_ndci_town if roi in ("town", None) else bloom_ndci_buf
+    bloom        = (bloom_full & BD_MASK) if roi in ("town", None) else (bloom_full & ROI_MASK)
+    bloom_ndci   = (water_new & (NDCI > ndci_thr))
 
-    # 3.5) 藻华检测 v2（Otsu 自适应阈值 + CMI 水生植物掩膜；替代旧伪标签 RF）
+    # 3.5) 藻华检测 v2（Otsu + CMI）
     bloom_ml = bloom.copy()
     bloom_prob = np.zeros(DST_SHAPE, dtype="float32")
     if ML is not None:
         try:
-            bloom_ml, bloom_prob = ML.detect(
-                B02, B03, B04, B05, B06, B08, B11, water_new)
+            bloom_ml, bloom_prob = ML.detect(B02, B03, B04, B05, B06, B08, B11, water_new)
             bloom_ml &= clip_mask
             bloom_prob *= clip_mask
         except Exception as _e:
@@ -345,65 +345,10 @@ def analyze(ndci_thr=0.10, fai_thr=0.005, mci_thr=0.005, jrc_thr=10, date=None, 
     water_fc, _ = P.vectorize_water(water_new, DST_TRANSFORM, tol_m=15.0)
     bloom_fc = _vectorize_with_stats(bloom, DST_TRANSFORM, NDCI, tol_m=12.0)
     bloom_ml_fc = _vectorize_with_stats(bloom_ml, DST_TRANSFORM, NDCI, tol_m=12.0)
-    json.dump(water_fc, open(os.path.join(OUT, "water.geojson"), "w"), ensure_ascii=False)
-    json.dump(bloom_fc, open(os.path.join(OUT, "bloom.geojson"), "w"), ensure_ascii=False)
-    json.dump(bloom_ml_fc, open(os.path.join(OUT, "bloom_ml.geojson"), "w"), ensure_ascii=False)
 
-    # 5) 渲染 PNG / JPEG —— 真彩用 JPEG 压缩(1.85MB->~300KB)，其余 PNG 开启 optimize
-    from PIL import Image as _PILImage
-    rgb = np.stack([B04, B03, B02], 0); rgb = np.clip(rgb, 0, 0.4)
-    rgb = np.nan_to_num(rgb, nan=0.0)   # 合成引入的 NaN(全云像元) 置黑，避免 cast 警告
-    rgb_s = np.transpose(P.stretch_truecolor(rgb), (1, 2, 0))
-    _PILImage.fromarray(rgb_s).save(os.path.join(OUT, "rgb.jpg"), "JPEG", quality=82, optimize=True)
-    for nm in ("bloom.png", "old.png", "water.png"):
-        fp = os.path.join(OUT, nm)
-        if os.path.exists(fp):
-            try:
-                im = _PILImage.open(fp); im.save(fp, optimize=True, compress_level=9)
-            except Exception as _e:
-                print("[optimize] skip", nm, _e)
-    ndci_fp = os.path.join(OUT, "ndci.png")
-    P.index_to_png(NDCI, water_new.astype(bool), P.NDCI_CMAP, -0.05, 0.15, ndci_fp)
-    # 转 WebP(带透明通道) 大幅减小体积，避免 600KB+ PNG 拖慢加载；PNG 保留作回退
-    try:
-        _im = _PILImage.open(ndci_fp).convert("RGBA")
-        _im.save(os.path.join(OUT, "ndci.webp"), "WEBP", quality=82, method=4)
-    except Exception as _e:
-        print("[ndci webp] keep png fallback:", _e)
-    P.bloom_to_png(bloom, os.path.join(OUT, "bloom.png"))
-    P.mask_to_png(water_old, [255, 60, 60], os.path.join(OUT, "old.png"), alpha=170)
-    P.mask_to_png(water_new, [30, 144, 255], os.path.join(OUT, "water.png"), alpha=150)
-
-    # 6.5) 写出带坐标的 GeoTIFF（供 XYZ 瓦片服务：放大锐利 + 超分上采样）
-    def _save_tif(a, name, dtype, count=1, nodata=None):
-        p = os.path.join(OUT, name)
-        with rasterio.open(p, "w", driver="GTiff", height=DST_SHAPE[0], width=DST_SHAPE[1],
-                           count=count, dtype=dtype, crs="EPSG:4326",
-                           transform=DST_TRANSFORM, nodata=nodata) as d:
-            if count == 1:
-                d.write(a.astype(dtype), 1)
-            else:
-                for i in range(count):
-                    d.write((a[:, :, i] if a.ndim == 3 else a).astype(dtype), i + 1)
-    rgb_clipped = rgb_s.copy(); rgb_clipped[~clip_mask] = 0   # 0 → 瓦片透明，底图服从显示 ROI
-    _save_tif(rgb_clipped, "rgb.tif", "uint8", 3)
-    ndci_disp = NDCI.astype("float32").copy(); ndci_disp[~clip_mask] = 0.0
-    _save_tif(ndci_disp, "ndci.tif", "float32", 1, nodata=0.0)
-    _save_tif((water_new & clip_mask).astype("uint8"), "water.tif", "uint8", 1, nodata=0)
-    _save_tif((bloom & clip_mask).astype("uint8"), "bloom.tif", "uint8", 1, nodata=0)
-    _save_tif((bloom_ml & clip_mask).astype("uint8"), "bloom_ml.tif", "uint8", 1, nodata=0)
-    _save_tif((bloom_prob * clip_mask).astype("float32"), "bloom_ml_prob.tif", "float32", 1, nodata=0.0)
-    _save_tif((water_old & clip_mask).astype("uint8"), "old.tif", "uint8", 1, nodata=0)
-    # 失效旧瓦片缓存（阈值/日期变化后旧瓦片已不准）
-    _td = os.path.join(OUT, "tiles")
-    if os.path.isdir(_td):
-        shutil.rmtree(_td)
-
-    # 6) 统计
     n_old = int(water_old.sum()); n_new = int(water_new.sum())
-    n_bloom = int(bloom_ndci.sum())   # GEE 头条面积 = NDCI>0.10 像元数（与 GEE_S2 一致）
-    # GEE 对齐参考（5km 缓冲区，与 GEE clip(roi) 逐字一致）
-    gee_water = int(water_buf.sum()); gee_bloom = int(bloom_ndci_buf.sum())
+    n_bloom = int(bloom_ndci.sum())
+    gee_water = int((water_full & ROI_MASK).sum()); gee_bloom = int((water_full & ROI_MASK & (NDCI > ndci_thr)).sum())
     wi = water_new
     centroid = None
     if wi.sum():
@@ -446,9 +391,46 @@ def analyze(ndci_thr=0.10, fai_thr=0.005, mci_thr=0.005, jrc_thr=10, date=None, 
         "thresholds": {"ndci": ndci_thr, "fai": fai_thr, "mci": mci_thr, "jrc": jrc_thr},
         "rev": 0,
     }
-    json.dump(result, open(os.path.join(OUT, "result.json"), "w"), ensure_ascii=False, indent=2)
-    # 写入版本号(=result.json 修改时间)，前端据此决定何时刷新缓存
-    result["rev"] = int(os.path.getmtime(os.path.join(OUT, "result.json")))
+
+    # 渲染用数组（已裁剪到 ROI；外部置 0 以便瓦片透明）
+    from PIL import Image as _PILImage
+    rgb = np.stack([B04, B03, B02], 0); rgb = np.clip(rgb, 0, 0.4)
+    rgb = np.nan_to_num(rgb, nan=0.0)
+    rgb_s = np.transpose(P.stretch_truecolor(rgb), (1, 2, 0))
+    rgb_clipped = rgb_s.copy().astype("uint8"); rgb_clipped[~clip_mask] = 0
+    ndci_disp = NDCI.astype("float32").copy(); ndci_disp[~clip_mask] = 0.0
+
+    combo = {
+        "key": combo_key_of(date, roi), "date": scene_date, "roi": roi,
+        "rgb": rgb_clipped, "ndci": ndci_disp,
+        "water": water_new, "bloom": bloom,
+        "bloomml": bloom_ml, "bloommlp": bloom_prob,
+        "old": (water_old & clip_mask),
+        "water_fc": water_fc, "bloom_fc": bloom_fc, "bloom_ml_fc": bloom_ml_fc,
+        "stats": result,
+    }
+    return combo
+
+
+def discover_dates(window=45, limit=6):
+    """从 STAC 发现最近可用的单景日期（云量<60），用于静态多组合预计算。"""
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    start = (now - _dt.timedelta(days=window)).strftime('%Y-%m-%d')
+    end = now.strftime('%Y-%m-%d')
+    feats = _query_stac(start, end)
+    ds = sorted({f["properties"]["datetime"][:10] for f in feats})
+    return ds[-limit:]
+
+
+def analyze(ndci_thr=0.10, fai_thr=0.005, mci_thr=0.005, jrc_thr=10, date=None, roi="town"):
+    """兼容旧接口：运行流水线并写出默认（composite_town 等价）扁平 outputs/*，供本地开发服务器使用。"""
+    combo = compute(date, roi)
+    result = combo["stats"]
+    json.dump(combo["water_fc"], open(os.path.join(OUT, "water.geojson"), "w"), ensure_ascii=False)
+    json.dump(combo["bloom_fc"], open(os.path.join(OUT, "bloom.geojson"), "w"), ensure_ascii=False)
+    json.dump(combo["bloom_ml_fc"], open(os.path.join(OUT, "bloom_ml.geojson"), "w"), ensure_ascii=False)
+    result["rev"] = int(time.time())
     json.dump(result, open(os.path.join(OUT, "result.json"), "w"), ensure_ascii=False, indent=2)
     print(f"[analyze] done: water={result['water_ha']}ha bloom={result['bloom_ha']}ha status={result['status']}")
     return result
@@ -551,114 +533,142 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _prob_to_png(self, prob, water, fp):
-        """把 0~1 概率按 黄->橙->红 热图渲染（透明<0.3），带水体掩膜。"""
-        from PIL import Image as _PILImage
-        H, W = prob.shape
-        rgba = np.zeros((H, W, 4), dtype="uint8")
-        m = water & (prob > 0.3)
-        if m.sum() == 0:
-            _PILImage.fromarray(rgba, "RGBA").save(fp, "PNG", optimize=True)
-            return
-        t = np.clip((prob[m] - 0.3) / 0.7, 0, 1)          # 0.3->0, 1.0->1
-        r = np.interp(t, [0.0, 0.5, 1.0], [255, 255, 255]).astype("uint8")
-        g = np.interp(t, [0.0, 0.5, 1.0], [255, 140, 0]).astype("uint8")
-        b = np.interp(t, [0.0, 0.5, 1.0], [0, 0, 0]).astype("uint8")
-        rgba[m, 0], rgba[m, 1], rgba[m, 2] = r, g, b
-        rgba[m, 3] = 210
+def _prob_to_png(prob, water, fp):
+    """把 0~1 概率按 黄->橙->红 热图渲染（透明<0.3），带水体掩膜。"""
+    from PIL import Image as _PILImage
+    H, W = prob.shape
+    rgba = np.zeros((H, W, 4), dtype="uint8")
+    m = water & (prob > 0.3)
+    if m.sum() == 0:
         _PILImage.fromarray(rgba, "RGBA").save(fp, "PNG", optimize=True)
+        return
+    t = np.clip((prob[m] - 0.3) / 0.7, 0, 1)          # 0.3->0, 1.0->1
+    r = np.interp(t, [0.0, 0.5, 1.0], [255, 255, 255]).astype("uint8")
+    g = np.interp(t, [0.0, 0.5, 1.0], [255, 140, 0]).astype("uint8")
+    b = np.interp(t, [0.0, 0.5, 1.0], [0, 0, 0]).astype("uint8")
+    rgba[m, 0], rgba[m, 1], rgba[m, 2] = r, g, b
+    rgba[m, 3] = 210
+    _PILImage.fromarray(rgba, "RGBA").save(fp, "PNG", optimize=True)
 
     def _serve_tile(self, path):
-        # 支持 /tiles_gcj/<layer>/... 目录前缀（=高德 GCJ 纠偏瓦片；静态托管无法靠 query 区分）
-        m = re.match(r"/(tiles_gcj|tiles)/([a-z]+)/(\d+)/(\d+)/(\d+)\.png$", path)
+        # 支持 /tiles[/_gcj]/<comboKey>/<layer>/z/x/y.png
+        m = re.match(r"/(tiles_gcj|tiles)/([A-Za-z0-9_-]+)/([a-z]+)/(\d+)/(\d+)/(\d+)\.png$", path)
         if not m:
             return self._send(404, {"error": "bad tile"})
-        layer, z, x, y = m.group(2), int(m.group(3)), int(m.group(4)), int(m.group(5))
-        gcj = (m.group(1) == "tiles_gcj") or \
-              parse_qs(urlparse(self.path).query).get("gcj", ["0"])[0] == "1"
+        prefix, combo_key, layer, z, x, y = (m.group(1), m.group(2), m.group(3),
+                                             int(m.group(4)), int(m.group(5)), int(m.group(6)))
+        gcj = (prefix == "tiles_gcj")
         mb = self._mercator_bounds(z, x, y)
-        # 相交判定：瓦片与 bbox 任意重叠即渲染（注意 mb[1]=瓦片北界, mb[3]=瓦片南界）
+        # 相交判定：瓦片与 bbox 任意重叠即渲染（mb[1]=瓦片北界, mb[3]=瓦片南界）
         if not (mb[0] < BBOX_MERC[2] and mb[2] > BBOX_MERC[0]
                 and mb[1] > BBOX_MERC[1] and mb[3] < BBOX_MERC[3]):
             return self._send_png(self._transparent_tile())
-        tag = "_gcj" if gcj else ""
-        tile_fp = os.path.join(OUT, "tiles", f"{layer}/{z}/{x}/{y}{tag}.png")
-        if os.path.exists(tile_fp):
-            return self._serve_file(tile_fp, "image/png")
-        os.makedirs(os.path.dirname(tile_fp), exist_ok=True)
         try:
-            self._gen_tile(layer, z, x, y, mb, gcj, tile_fp)
+            combo = _get_combo(combo_key)
+            tile_fp = render_combo_tile(combo, layer, z, x, y, gcj, OUT)
         except Exception as e:
-            print("[tile] gen fail", layer, z, x, y, repr(e))
+            print("[tile] gen fail", combo_key, layer, z, x, y, repr(e))
             try:
-                open("/tmp/tile_err.log", "a").write("ERR %s %d/%d/%d: %r\n" % (layer, z, x, y, e))
+                open("/tmp/tile_err.log", "a").write("ERR %s %s %d/%d/%d: %r\n" % (combo_key, layer, z, x, y, e))
             except Exception:
                 pass
             return self._send_png(self._transparent_tile())
         return self._serve_file(tile_fp, "image/png")
 
-    def _gen_tile(self, layer, z, x, y, mb, gcj, tile_fp):
-        from rasterio.warp import reproject, Resampling
-        dt = P.fb(*mb, 256, 256)
-        if gcj:
-            st = P.fb(BBOX[0] + GCJ_DLON, BBOX[1] + GCJ_DLAT,
-                      BBOX[2] + GCJ_DLON, BBOX[3] + GCJ_DLAT, NCOL, NROW)
-        else:
-            st = DST_TRANSFORM
-        RW = dict(src_transform=st, src_crs="EPSG:4326", dst_transform=dt, dst_crs="EPSG:3857")
-        if layer == "rgb":
-            with rasterio.open(os.path.join(OUT, "rgb.tif")) as s:
-                src = s.read()
-            dst = np.zeros((3, 256, 256), dtype="uint8")
-            reproject(src, dst, resampling=Resampling.bilinear, **RW)
-            mask = ((dst.sum(0)) > 0).astype("uint8") * 255
-            from PIL import Image as _PILImage
-            _PILImage.fromarray(np.dstack([dst[0], dst[1], dst[2], mask]), "RGBA").save(tile_fp, "PNG", optimize=True)
-        elif layer == "ndci":
-            with rasterio.open(os.path.join(OUT, "ndci.tif")) as s:
-                nd = s.read(1)
-            with rasterio.open(os.path.join(OUT, "water.tif")) as s2:
-                wt = s2.read(1)
-            dst_nd = np.zeros((256, 256), dtype="float32")
-            dst_wt = np.zeros((256, 256), dtype="uint8")
-            reproject(nd, dst_nd, resampling=Resampling.bilinear, **RW)
-            reproject(wt, dst_wt, resampling=Resampling.nearest, **RW)
-            P.index_to_png(dst_nd, dst_wt.astype(bool), P.NDCI_CMAP, -0.05, 0.15, tile_fp)
-        elif layer in ("water", "old"):
-            with rasterio.open(os.path.join(OUT, layer + ".tif")) as s:
-                src = s.read(1)
-            dst = np.zeros((256, 256), dtype="uint8")
-            reproject(src, dst, resampling=Resampling.nearest, **RW)
-            col = [30, 144, 255] if layer == "water" else [255, 60, 60]
-            al = 150 if layer == "water" else 170
-            P.mask_to_png(dst.astype(bool), col, tile_fp, alpha=al)
-        elif layer == "bloom":
-            with rasterio.open(os.path.join(OUT, "bloom.tif")) as s:
-                src = s.read(1)
-            dst = np.zeros((256, 256), dtype="uint8")
-            reproject(src, dst, resampling=Resampling.nearest, **RW)
-            P.bloom_to_png(dst.astype(bool), tile_fp)
-        elif layer == "bloomml":
-            with rasterio.open(os.path.join(OUT, "bloom_ml.tif")) as s:
-                src = s.read(1)
-            dst = np.zeros((256, 256), dtype="uint8")
-            reproject(src, dst, resampling=Resampling.nearest, **RW)
-            P.bloom_to_png(dst.astype(bool), tile_fp)
-        elif layer == "bloommlp":
-            with rasterio.open(os.path.join(OUT, "bloom_ml_prob.tif")) as s:
-                pr = s.read(1)
-            with rasterio.open(os.path.join(OUT, "water.tif")) as s2:
-                wt = s2.read(1)
-            dst_p = np.zeros((256, 256), dtype="float32")
-            dst_w = np.zeros((256, 256), dtype="uint8")
-            reproject(pr, dst_p, resampling=Resampling.bilinear, **RW)
-            reproject(wt, dst_w, resampling=Resampling.nearest, **RW)
-            self._prob_to_png(dst_p, dst_w.astype(bool), tile_fp)
-        else:
-            raise ValueError("unknown layer " + layer)
-
     def log_message(self, *a):
         pass  # 静默
+
+
+# ---------- 多组合瓦片渲染（开发服务器按需 / 静态构建离线复用） ----------
+def _combo_from_key(key):
+    """comboKey -> (date, roi)。composite_town / composite_gee / 2026-07-21_town ..."""
+    if key.startswith("composite"):
+        date = None
+        roi = key[len("composite"):]
+        if roi.startswith("_"):
+            roi = roi[1:]
+    else:
+        date, roi = key.rsplit("_", 1)
+    if roi not in ("town", "gee"):
+        roi = "town"
+    return date, roi
+
+
+def _get_combo(key):
+    if key in COMBOS:
+        return COMBOS[key]
+    date, roi = _combo_from_key(key)
+    combo = compute(date, roi)
+    COMBOS[key] = combo
+    return combo
+
+
+def render_combo_tile(combo, layer, z, x, y, gcj, tiles_root):
+    """把 combo 的某个图层渲染成 XYZ 瓦片 PNG，写入
+       tiles_root/[tiles_gcj|tiles]/<combo_key>/<layer>/z/x/y.png。"""
+    from rasterio.warp import reproject, Resampling
+    from PIL import Image as _PILImage
+    sub = "tiles_gcj" if gcj else "tiles"
+    out_dir = os.path.join(tiles_root, sub, combo["key"], layer, str(z), str(x))
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, str(y) + ".png")
+    if os.path.exists(out_path):
+        return out_path
+    n = 2 ** z
+    lon0 = x / n * 360 - 180
+    lon1 = (x + 1) / n * 360 - 180
+    lat = lambda yy: math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * yy / n))))
+    mb = (_mx(lon0), _my(lat(y)), _mx(lon1), _my(lat(y + 1)))   # (w, n, e, s)
+    dt = P.fb(*mb, 256, 256)
+    if gcj:
+        st = P.fb(BBOX[0] + GCJ_DLON, BBOX[1] + GCJ_DLAT,
+                  BBOX[2] + GCJ_DLON, BBOX[3] + GCJ_DLAT, NCOL, NROW)
+    else:
+        st = DST_TRANSFORM
+    RW = dict(src_transform=st, src_crs="EPSG:4326", dst_transform=dt, dst_crs="EPSG:3857")
+    if layer == "rgb":
+        src = np.transpose(combo["rgb"], (2, 0, 1)).astype("uint8")
+        dst = np.zeros((3, 256, 256), dtype="uint8")
+        reproject(src, dst, resampling=Resampling.bilinear, **RW)
+        mask = ((dst.sum(0)) > 0).astype("uint8") * 255
+        _PILImage.fromarray(np.dstack([dst[0], dst[1], dst[2], mask]), "RGBA").save(out_path, "PNG", optimize=True)
+    elif layer == "ndci":
+        nd = combo["ndci"].astype("float32")
+        wt = combo["water"].astype("uint8")
+        dst_nd = np.zeros((256, 256), dtype="float32")
+        dst_wt = np.zeros((256, 256), dtype="uint8")
+        reproject(nd, dst_nd, resampling=Resampling.bilinear, **RW)
+        reproject(wt, dst_wt, resampling=Resampling.nearest, **RW)
+        P.index_to_png(dst_nd, dst_wt.astype(bool), P.NDCI_CMAP, -0.05, 0.15, out_path)
+    elif layer in ("water", "old"):
+        src = combo[layer].astype("uint8")
+        dst = np.zeros((256, 256), dtype="uint8")
+        reproject(src, dst, resampling=Resampling.nearest, **RW)
+        col = [30, 144, 255] if layer == "water" else [255, 60, 60]
+        al = 150 if layer == "water" else 170
+        P.mask_to_png(dst.astype(bool), col, out_path, alpha=al)
+    elif layer == "bloom":
+        src = combo["bloom"].astype("uint8")
+        dst = np.zeros((256, 256), dtype="uint8")
+        reproject(src, dst, resampling=Resampling.nearest, **RW)
+        P.bloom_to_png(dst.astype(bool), out_path)
+    elif layer == "bloomml":
+        src = combo["bloomml"].astype("uint8")
+        dst = np.zeros((256, 256), dtype="uint8")
+        reproject(src, dst, resampling=Resampling.nearest, **RW)
+        P.bloom_to_png(dst.astype(bool), out_path)
+    elif layer == "bloommlp":
+        pr = combo["bloommlp"].astype("float32")
+        wt = combo["water"].astype("uint8")
+        dst_p = np.zeros((256, 256), dtype="float32")
+        dst_w = np.zeros((256, 256), dtype="uint8")
+        reproject(pr, dst_p, resampling=Resampling.bilinear, **RW)
+        reproject(wt, dst_w, resampling=Resampling.nearest, **RW)
+        _prob_to_png(dst_p, dst_w.astype(bool), out_path)
+    else:
+        raise ValueError("unknown layer " + layer)
+    return out_path
+
 
 def main():
     port = int(os.environ.get("PORT", "8000"))

@@ -3,46 +3,42 @@
 """
 build_static.py — 把动态网站"固化"为纯静态站点（GitHub Pages 可托管）。
 
-流程：
-  1) 重新运行分析管线（45 天 median 合成，镇域 ROI）→ web/outputs/*
-  2) 启动本地瓦片服务（子进程，端口 8123）
-  3) 遍历 z10..z16 与分析网格相交的所有瓦片，分别预热 WGS(tiles/) 与
-     高德 GCJ(tiles_gcj/) 两套缓存（服务按请求生成并落盘 web/outputs/tiles/）
-  4) 组装 dist/：
-       index.html / static/                      （前端，已用相对路径）
-       outputs/  result.json + *.geojson + boundary.json（不含大型 tif）
-       tiles/    WGS 瓦片；tiles_gcj/ GCJ 瓦片（_gcj 后缀剥离子目录）
-       .nojekyll （关闭 Pages 的 Jekyll 处理）
+方案 A：构建时把多个组合（45天合成 / 各单景 × 黄埭镇边界 / 5km缓冲）一次性算好并切片，
+前端下拉直接切换不同瓦片集，静态站也能"秒切"，无需后端。
 
-本地（macOS）用法：
-  依赖已固化到项目内 venv（系统 python3.9.6 构建，h5py/rasterio 均按 3.9 编译）：
-    /usr/bin/python3 -m venv venv
-    venv/bin/python -m pip install numpy scipy shapely rasterio pillow folium requests tifffile h5py
-    venv/bin/python build_static.py
-  （旧方案 PYTHONPATH=/tmp/pylibs 易因系统清理丢失纯 python 文件，已弃用）
+流程：
+  1) 发现最近可用单景日期（STAC）
+  2) 对每个组合 (date × roi) 调用 app.compute()，写出：
+       outputs/combos/<comboKey>/result.json + *.geojson
+       outputs/tiles/<comboKey>/<layer>/z/x/y.png        (WGS84)
+       outputs/tiles_gcj/<comboKey>/<layer>/z/x/y.png      (高德 GCJ-02)
+  3) 生成 outputs/manifest.json（列出全部组合 + 关键统计）
+  4) 组装 dist/：index.html / static/ / outputs/(含 combos、tiles、tiles_gcj、manifest)
+
+本地（macOS）用法（依赖已固化到项目内 venv，系统 python3.9.6 构建）：
+   venv/bin/python build_static.py
 GitHub Actions（ubuntu）用法：
-  python3 build_static.py        # 依赖见 requirements_build.txt
+   python3 build_static.py        # 依赖见 requirements_build.txt
 """
-import os, sys, json, math, shutil, subprocess, time, urllib.request
+import os, sys, json, math, shutil, time
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB  = os.path.join(HERE, "web")
 OUT  = os.path.join(WEB, "outputs")
 DIST = os.path.join(HERE, "dist")
-PORT = int(os.environ.get("BUILD_PORT", "8123"))
-LAYERS = ["rgb", "ndci", "water", "bloom", "bloomml", "bloommlp", "old"]
-ZMIN, ZMAX = 10, 16
+LAYERS = ["rgb", "ndci", "water", "bloom", "old", "bloomml", "bloommlp"]   # 每个组合预渲染的全部图层
+ZMIN, ZMAX = 10, 15
 WORKERS = 8
+MAX_SINGLE_DATES = 5                          # 单景组合数量上限（控制瓦片总量）
 
 sys.path.insert(0, WEB)
-import app as A  # web/app.py（模块级常量：BBOX / DST_TRANSFORM 等）
+import app as A  # web/app.py（提供 compute / render_combo_tile / discover_dates / BBOX 等）
 
 
 # ---------------------------------------------------------------- 瓦片枚举
 def tiles_intersecting(z):
-    """正确的墨卡托重叠判定（瓦片与 bbox 任意相交即收），返回 [(z,x,y), ...]。
-    注：mb 返回 (west, north, east, south)；只要四边有交叠即算命中。"""
+    """正确的墨卡托重叠判定（瓦片与 bbox 任意相交即收），返回 [(z,x,y), ...]。"""
     n = 2 ** z
     RM = 6378137.0
     mx = lambda lon: math.radians(lon) * RM
@@ -70,107 +66,150 @@ def tiles_intersecting(z):
     return out
 
 
+def _roi_label(roi):
+    return "黄埭镇边界" if roi in ("town", None) else "5km缓冲(GEE)"
+
+
 # ---------------------------------------------------------------- 步骤
-def step_analyze():
-    print("[build] 1/4 运行分析管线（45天合成 · 镇域 ROI）...", flush=True)
-    os.makedirs(OUT, exist_ok=True)   # 全新克隆（Actions）时 outputs/ 可能不存在
-    r = A.analyze(roi="town")
-    print(f"[build]    water={r['water_ha']}ha bloom={r['bloom_ha']}ha "
-          f"ndci_p90={r.get('ndci_p90')} scenes={r.get('scene_dates')}", flush=True)
-    return r
+def step_build_combos():
+    print("[build] 1/3 多组合预计算（合成 + 单景 × 镇域/5km缓冲）...", flush=True)
+    os.makedirs(OUT, exist_ok=True)
+    dates = A.discover_dates(limit=MAX_SINGLE_DATES)
+    print(f"[build]   发现单景日期: {dates}", flush=True)
 
+    combos = [(None, "town"), (None, "gee")]
+    for d in dates:
+        combos.append((d, "town"))
+        combos.append((d, "gee"))
 
-def step_serve():
-    print("[build] 2/4 启动本地瓦片服务 :%d ..." % PORT, flush=True)
-    env = dict(os.environ)
-    env["PORT"] = str(PORT)
-    proc = subprocess.Popen(
-        [sys.executable, os.path.join(WEB, "app.py")],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
-    for i in range(90):
+    manifest = {"default": "composite_town", "built_at": "", "combos": {}}
+    total_tiles = 0
+
+    for (date, roi) in combos:
+        key = A.combo_key_of(date, roi)
+        print(f"[build]   ▶ {key} ...", flush=True)
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/status", timeout=2)
-            print("[build]    服务就绪", flush=True)
-            return proc
-        except Exception:
-            time.sleep(1)
-    proc.kill()
-    raise RuntimeError("瓦片服务启动超时")
+            combo = A.compute(date, roi)
+        except Exception as e:
+            print(f"[build]     ✗ compute 失败，跳过: {e}", flush=True)
+            continue
+        stats = combo["stats"]
+        # 每组合独立输出目录
+        cdir = os.path.join(OUT, "combos", key)
+        os.makedirs(cdir, exist_ok=True)
+        json.dump(combo["water_fc"],    open(os.path.join(cdir, "water.geojson"), "w"),    ensure_ascii=False)
+        json.dump(combo["bloom_fc"],    open(os.path.join(cdir, "bloom.geojson"), "w"),    ensure_ascii=False)
+        json.dump(combo["bloom_ml_fc"], open(os.path.join(cdir, "bloom_ml.geojson"), "w"), ensure_ascii=False)
+        json.dump(stats,                open(os.path.join(cdir, "result.json"), "w"),     ensure_ascii=False, indent=2)
+
+        # 离线渲染瓦片（WGS + GCJ 两套）
+        jobs = []
+        for z in range(ZMIN, ZMAX + 1):
+            cells = tiles_intersecting(z)
+            for (zz, x, y) in cells:
+                for layer in LAYERS:
+                    jobs.append((combo, layer, zz, x, y, False, OUT))
+                    jobs.append((combo, layer, zz, x, y, True, OUT))
+        done = 0
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            for ok in ex.map(_render_one, jobs):
+                done += 1 if ok else 0
+        total_tiles += len(jobs)
+        print(f"[build]     ✓ 水{stats['water_ha']}ha 藻{stats['bloom_ha']}ha "
+              f"状态{stats['status']} | 瓦片 {len(jobs)}", flush=True)
+
+        manifest["combos"][key] = {
+            "key": key,
+            "date": date,
+            "roi": roi,
+            "label": ("45天合成" if date is None else date) + " · " + _roi_label(roi),
+            "roi_label": _roi_label(roi),
+            "composite": date is None,
+            "scene_date": stats["date"],
+            "cloud": stats["cloud"],
+            "n_scenes": stats["n_scenes"],
+            "water_ha": stats["water_ha"],
+            "bloom_ha": stats["bloom_ha"],
+            "bloom_ml_ha": stats["bloom_ml_ha"],
+            "status": stats["status"],
+            "ndci_p90": stats["ndci_p90"],
+        }
+
+    # 顶部默认输出（composite_town）供开发模式 / 向后兼容
+    def _copy_default(name, src_name=None):
+        src_name = src_name or name
+        s = os.path.join(OUT, "combos", "composite_town", src_name)
+        if os.path.exists(s):
+            shutil.copy(s, os.path.join(OUT, name))
+    _copy_default("result.json")
+    _copy_default("water.geojson")
+    _copy_default("bloom.geojson")
+    _copy_default("bloom_ml.geojson")
+    # 边界文件（前端需要 outputs/boundary.json）
+    bd_src = os.path.join(HERE, "黄埭镇边界.json")
+    if os.path.exists(bd_src):
+        shutil.copy(bd_src, os.path.join(OUT, "boundary.json"))
+
+    manifest["built_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    json.dump(manifest, open(os.path.join(OUT, "manifest.json"), "w"), ensure_ascii=False, indent=2)
+    print(f"[build]   共 {len(manifest['combos'])} 个组合，计划瓦片 {total_tiles} 块", flush=True)
+    return manifest
 
 
-def _fetch(url):
+def _render_one(args):
+    combo, layer, z, x, y, gcj, tiles_root = args
     try:
-        with urllib.request.urlopen(url, timeout=120) as r:
-            r.read()
+        A.render_combo_tile(combo, layer, z, x, y, gcj, tiles_root)
         return True
     except Exception as e:
-        print("[build]    瓦片失败", url, repr(e), flush=True)
+        print("[tile] fail", combo["key"], layer, z, x, y, gcj, repr(e), flush=True)
         return False
 
 
-def step_warm_tiles():
-    print("[build] 3/4 预热瓦片 z%d-%d × %d 层 × 2 变体 ..." % (ZMIN, ZMAX, len(LAYERS)), flush=True)
-    jobs = []
-    for z in range(ZMIN, ZMAX + 1):
-        cells = tiles_intersecting(z)
-        print(f"[build]    z{z}: {len(cells)} 块", flush=True)
-        for (zz, x, y) in cells:
-            for layer in LAYERS:
-                jobs.append(f"http://127.0.0.1:{PORT}/tiles/{layer}/{zz}/{x}/{y}.png")
-                jobs.append(f"http://127.0.0.1:{PORT}/tiles_gcj/{layer}/{zz}/{x}/{y}.png")
-    print(f"[build]    共 {len(jobs)} 个请求（{WORKERS} 并发）", flush=True)
-    ok = 0
-    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        for good in ex.map(_fetch, jobs):
-            ok += 1 if good else 0
-    print(f"[build]    瓦片完成 {ok}/{len(jobs)}", flush=True)
-    if ok < len(jobs) * 0.98:
-        raise RuntimeError(f"瓦片预热失败过多：{len(jobs)-ok} 个失败")
-
-
 def step_assemble():
-    print("[build] 4/4 组装 dist/ ...", flush=True)
+    print("[build] 2/3 组装 dist/ ...", flush=True)
     if os.path.isdir(DIST):
         shutil.rmtree(DIST)
     os.makedirs(DIST)
 
-    # 前端（index.html 已在仓库内使用相对路径）
+    # 前端（index.html 已用相对路径）
     shutil.copy(os.path.join(WEB, "static", "index.html"), os.path.join(DIST, "index.html"))
     shutil.copytree(os.path.join(WEB, "static"), os.path.join(DIST, "static"),
                     ignore=shutil.ignore_patterns("index.html"))
 
-    # 数据（只带前端需要的；不带大型 tif/png/jpg 中间产物）
+    # 数据层
     os.makedirs(os.path.join(DIST, "outputs"))
     for fn in ("result.json", "water.geojson", "bloom.geojson",
-               "bloom_ml.geojson", "boundary.json"):
+               "bloom_ml.geojson", "boundary.json", "manifest.json", "build_info.json"):
         src = os.path.join(OUT, fn)
-        if not os.path.exists(src) and fn == "boundary.json":
-            src = os.path.join(HERE, "黄埭镇边界.json")   # 全新克隆时回退到仓库根
         if os.path.exists(src):
             shutil.copy(src, os.path.join(DIST, "outputs", fn))
-        else:
-            print("[build]    ⚠ 缺", fn, flush=True)
 
-    # 瓦片：无 _gcj 后缀 → tiles/；有 _gcj 后缀 → tiles_gcj/（剥后缀）
-    tdir = os.path.join(OUT, "tiles")
+    # 多组合结果
+    cdir = os.path.join(OUT, "combos")
+    if os.path.isdir(cdir):
+        shutil.copytree(cdir, os.path.join(DIST, "outputs", "combos"))
+
+    # 瓦片：WGS 与 GCJ 已分目录，整树拷贝到 dist 顶层（dist/tiles、dist/tiles_gcj）。
+    # 注意：前端用相对路径 "tiles_gcj/<combo>/..." 请求（与已验证的旧版一致），
+    # 开发服务器 app.py 也以 "/tiles_gcj/..." 从 web/outputs/tiles_gcj 提供，故瓦片必须放顶层。
     n_wgs = n_gcj = 0
-    for layer in LAYERS:
-        for root, _dirs, files in os.walk(os.path.join(tdir, layer)):
+    for sub in ("tiles", "tiles_gcj"):
+        src = os.path.join(OUT, sub)
+        if not os.path.isdir(src):
+            continue
+        for root, _d, files in os.walk(src):
             for f in files:
                 if not f.endswith(".png"):
                     continue
-                src = os.path.join(root, f)
-                rel_dir = os.path.relpath(root, tdir)      # <layer>/<z>/<x>
-                if f.endswith("_gcj.png"):
-                    dst_dir = os.path.join(DIST, "tiles_gcj", rel_dir)
-                    dst = os.path.join(dst_dir, f[:-len("_gcj.png")] + ".png")
-                    n_gcj += 1
-                else:
-                    dst_dir = os.path.join(DIST, "tiles", rel_dir)
-                    dst = os.path.join(dst_dir, f)
+                rel = os.path.relpath(root, src)
+                dst = os.path.join(DIST, sub, rel, f)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy(os.path.join(root, f), dst)
+                if sub == "tiles":
                     n_wgs += 1
-                os.makedirs(dst_dir, exist_ok=True)
-                shutil.copy(src, dst)
+                else:
+                    n_gcj += 1
     print(f"[build]    瓦片落盘 tiles/={n_wgs}  tiles_gcj/={n_gcj}", flush=True)
 
     # .nojekyll + 构建信息
@@ -188,16 +227,7 @@ def step_assemble():
 
 
 def main():
-    step_analyze()
-    proc = step_serve()
-    try:
-        step_warm_tiles()
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except Exception:
-            proc.kill()
+    step_build_combos()
     step_assemble()
 
 

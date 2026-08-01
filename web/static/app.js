@@ -27,9 +27,15 @@ let REV = 0;              // 资源版本号：仅“重新分析”后变化，
 let BASEMAP = "gaode";    // gaode | esri | osm  (高德为国内默认，瓦片最快)
 let MODE = "composite";   // composite | 2026-07-26 | 2026-07-21 | 2026-06-26
 let ROI = "town";         // town（黄埭镇行政边界精确切出） | gee（5km 缓冲区，GEE 对齐）
+let MANIFEST = null;      // 静态模式：outputs/manifest.json（列出全部预计算组合）
+let COMBO = "composite_town";  // 当前组合键：composite_town / 2026-07-21_town ...
 
 const $ = (id) => document.getElementById(id);
 const ts = () => "?t=" + REV;
+// 由当前 MODE/ROI 推导组合键（与后端 combo_key_of 一致）
+function currentComboKey() {
+  return (MODE === "composite" ? "composite" : MODE) + "_" + ROI;
+}
 
 // ---------- WGS84 -> GCJ-02（高德底图纠偏，保证叠加层对齐） ----------
 function outOfChina(lon, lat) {
@@ -82,32 +88,8 @@ function coordsToLatLng(c) {
 
 // ---------- 初始化 ----------
 let STATIC_MODE = false;   // true = 静态托管（GitHub Pages），无 Python 后端
-async function init() {
-  // 1) 拉取结果：优先本地 /api/status；失败则回退静态 outputs/result.json
-  try {
-    const r = await fetch("/api/status");
-    result = await r.json();
-    if (result && result.ready === false) result = null;
-  } catch (e) { result = null; }
-  if (!result || !result.ready) {
-    try {
-      const r2 = await fetch("outputs/result.json" + "?t=" + Date.now());
-      const j = await r2.json();
-      if (j && j.ready) { result = j; STATIC_MODE = true; }
-    } catch (e) { /* 保持 null */ }
-  }
 
-  const bbox = (result && result.bbox) || DEFAULT_BBOX;
-  const b = [[bbox[1], bbox[0]], [bbox[3], bbox[2]]]; // 北西-南东
-  const center = [(bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2];
-
-  // 2) 创建地图容器（必须最先，否则图层无处挂载 -> 页面一直转圈）
-  map = L.map("leaflet", { zoomControl: true, attributionControl: false, preferCanvas: true })
-        .setView(center, 13);
-  L.control.attribution({ position: "bottomleft", prefix: false }).addTo(map);
-  setBasemap(BASEMAP);
-
-  // 3) 加载矢量数据（相对路径：本地/静态托管通用）
+async function loadFlatGeojson() {
   try {
     const [water, bloom, bd] = await Promise.all([
       fetch("outputs/water.geojson" + ts()).then((x) => x.json()),
@@ -116,13 +98,100 @@ async function init() {
     ]);
     waterFC = water; allBloom = bloom; boundaryFC = bd;
   } catch (e) { console.warn("geojson 加载失败", e); }
+}
 
-  if (result && result.rev) REV = result.rev;   // 命中缓存：仅版本变化时刷新
-
-  buildLayers();
+// 静态模式：按组合键拉取对应 result.json + geojson 并重建图层（秒切，无后端）
+async function applyCombo(key) {
+  COMBO = key;
+  const parts = key.split("_");
+  MODE = parts[0];                                   // composite 或 日期
+  ROI = parts.length > 1 ? parts[1] : "town";
+  const [res, water, bloom] = await Promise.all([
+    fetch("outputs/combos/" + key + "/result.json" + ts()).then((x) => x.json()),
+    fetch("outputs/combos/" + key + "/water.geojson" + ts()).then((x) => x.json()),
+    fetch("outputs/combos/" + key + "/bloom.geojson" + ts()).then((x) => x.json()),
+  ]);
+  result = res; waterFC = water; allBloom = bloom;
+  if (result.rev) REV = result.rev;
+  rebuildOverlays();          // buildLayers + applyVisibility + renderBloom
   applyResult();
-  applyVisibility();
-  renderBloom(parseFloat($("ndci-slider").value));
+}
+
+// 静态模式：用 manifest 填充 影像模式 / 显示范围 下拉
+function populateDropdowns() {
+  const md = $("mode"), rs = $("roi");
+  if (!md || !rs || !MANIFEST) return;
+  const dates = [];
+  Object.values(MANIFEST.combos).forEach((c) => {
+    if (c.date && !dates.includes(c.date)) dates.push(c.date);
+  });
+  dates.sort();
+  md.innerHTML = "";
+  const o0 = document.createElement("option");
+  o0.value = "composite"; o0.textContent = "45天合成（最新）"; md.appendChild(o0);
+  dates.forEach((d) => {
+    const o = document.createElement("option"); o.value = d; o.textContent = d; md.appendChild(o);
+  });
+  rs.innerHTML = "";
+  const ot = document.createElement("option"); ot.value = "town"; ot.textContent = "黄埭镇边界"; rs.appendChild(ot);
+  const og = document.createElement("option"); og.value = "gee"; og.textContent = "5km缓冲(GEE)"; rs.appendChild(og);
+  const parts = COMBO.split("_");
+  md.value = parts[0];
+  rs.value = parts.length > 1 ? parts[1] : "town";
+}
+
+async function init() {
+  const bbox = DEFAULT_BBOX;
+  const center = [(bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2];
+
+  // 1) 创建地图容器（必须最先，否则图层无处挂载 -> 页面一直转圈）
+  map = L.map("leaflet", { zoomControl: true, attributionControl: false, preferCanvas: true })
+        .setView(center, 13);
+  L.control.attribution({ position: "bottomleft", prefix: false }).addTo(map);
+  setBasemap(BASEMAP);
+
+  // 2) 开发模式：优先 /api/status（本地 Flask 式服务）
+  let devResult = null;
+  try {
+    const r = await fetch("/api/status");
+    const j = await r.json();
+    if (j && j.ready) devResult = j;
+  } catch (e) { /* 非开发模式 */ }
+
+  if (devResult) {
+    result = devResult; STATIC_MODE = false;
+    await loadFlatGeojson();
+    if (result.rev) REV = result.rev;
+    buildLayers(); applyResult(); applyVisibility(); renderBloom(parseFloat($("ndci-slider").value));
+    $("map-loading").classList.add("hidden");
+    wireControls();
+    return;
+  }
+
+  // 3) 静态模式：manifest 驱动多组合切换
+  try {
+    const m = await fetch("outputs/manifest.json" + "?t=" + Date.now());
+    MANIFEST = await m.json();
+    STATIC_MODE = true;
+  } catch (e) { console.warn("manifest 加载失败，回退扁平 result", e); }
+
+  if (MANIFEST) {
+    REV = MANIFEST.built_at ? Math.floor(Date.parse(MANIFEST.built_at) / 1000) : Date.now();
+    COMBO = MANIFEST.default || "composite_town";
+    populateDropdowns();
+    await applyCombo(COMBO);
+  } else {
+    // 4) 兜底：旧扁平 result.json
+    try {
+      const r2 = await fetch("outputs/result.json" + "?t=" + Date.now());
+      const j = await r2.json();
+      if (j && j.ready) { result = j; STATIC_MODE = true; }
+    } catch (e) { /* 保持 null */ }
+    await loadFlatGeojson();
+    if (result && result.rev) REV = result.rev;
+    COMBO = currentComboKey();
+    buildLayers(); applyResult(); applyVisibility(); renderBloom(parseFloat($("ndci-slider").value));
+  }
 
   $("map-loading").classList.add("hidden");
   wireControls();
@@ -153,11 +222,12 @@ function setBasemap(name) {
 // ---------- 构建图层 ----------
 function buildLayers() {
   layers = {};
+  COMBO = currentComboKey();   // 始终由当前 MODE/ROI 推导
   const b = bboxToBasemap((result && result.bbox) || DEFAULT_BBOX);
   const wb = (result && result.bbox) || DEFAULT_BBOX;
   // 目录式 GCJ 变体（静态服务器忽略 query，故用目录区分）：高德底图用 tiles_gcj/，其余用 tiles/
   const tBase = (BASEMAP === "gaode" ? "tiles_gcj/" : "tiles/");
-  const tUrl = (n) => tBase + n + "/{z}/{x}/{y}.png?v=" + REV;
+  const tUrl = (n) => tBase + COMBO + "/" + n + "/{z}/{x}/{y}.png?v=" + REV;
   const tOpt = { bounds: [[wb[1], wb[0]], [wb[3], wb[2]]], noWrap: true, minZoom: 10, maxZoom: 17, keepBuffer: 2 };
   layers.rgb  = L.tileLayer(tUrl("rgb"),  Object.assign({ opacity: 1.0,  zIndex: 10 }, tOpt));
   layers.ndci = L.tileLayer(tUrl("ndci"), Object.assign({ opacity: 0.7,  zIndex: 30 }, tOpt));
@@ -268,22 +338,28 @@ function wireControls() {
   const md = $("mode");
   if (md) {
     md.value = MODE;
-    md.addEventListener("change", () => { MODE = md.value; rerun(); });
+    md.addEventListener("change", () => {
+      MODE = md.value;
+      if (STATIC_MODE) applyCombo(currentComboKey()); else rerun();
+    });
   }
   const rs = $("roi");
   if (rs) {
     rs.value = ROI;
-    rs.addEventListener("change", () => { ROI = rs.value; rerun(); });
+    rs.addEventListener("change", () => {
+      ROI = rs.value;
+      if (STATIC_MODE) applyCombo(currentComboKey()); else rerun();
+    });
   }
   const bm = $("basemap");
   if (bm) { bm.value = BASEMAP; bm.addEventListener("change", () => setBasemap(bm.value)); }
-  // 静态托管模式：无 Python 后端，禁用重算类控件并提示
+  // 静态托管模式：无 Python 后端，「重新分析」禁用；但 影像模式/显示范围 下拉
+  // 已变为「即时切换预计算组合」，保持可用（applyCombo 秒切不同瓦片集）。
   if (STATIC_MODE) {
     const rb = $("btn-rerun");
     if (rb) { rb.disabled = true; rb.style.opacity = ".55"; rb.textContent = "重新分析（需后端）"; }
-    ["mode", "roi"].forEach((k) => { const el = $(k); if (el) el.disabled = true; });
     const rh = $("rerun-hint");
-    if (rh) rh.textContent = "静态展示版 · 数据每日自动更新";
+    if (rh) rh.textContent = "静态展示版 · 多组合已预切片，下拉即时切换；数据每日自动更新";
   }
 }
 

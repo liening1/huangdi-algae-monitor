@@ -200,10 +200,20 @@ def _build_composite():
     used = []
     for f in feats:
         dt = f["properties"]["datetime"][:10].replace("-", "")
-        try:
-            b, _, _, _ = _load_bands(f, dt)
-        except Exception as e:
-            print("  [skip]", f["id"], e); continue
+        b = None
+        for attempt in range(4):
+            try:
+                b, _, _, _ = _load_bands(f, dt)
+                break
+            except Exception as e:
+                if "429" in str(e) and attempt < 3:
+                    wait = 15 * (attempt + 1)
+                    print(f"  [retry {attempt+1}/4] 429 限流，等待 {wait}s 后重试 {dt}...")
+                    time.sleep(wait)
+                    continue
+                print("  [skip]", f["id"], e); break
+        if b is None:
+            continue
         scl = b['SCL']
         clear = ~np.isin(scl, list(P.SCL_MASK)) if scl.size else np.zeros(DST_SHAPE, bool)
         for k in keys:
@@ -276,7 +286,17 @@ def compute(date=None, roi="town"):
             raise RuntimeError(f"STAC 未找到 {date} 的 S2 场景")
         item = feats[0]
         date_tag = date.replace("-", "")
-        bands, _, _, _ = _load_bands(item, date_tag)
+        bands = None
+        for attempt in range(4):
+            try:
+                bands, _, _, _ = _load_bands(item, date_tag)
+                break
+            except Exception as e:
+                if "429" in str(e) and attempt < 3:
+                    wait = 15 * (attempt + 1)
+                    print(f"[retry {attempt+1}/4] 429 限流，等待 {wait}s 后重试 {date}...")
+                    time.sleep(wait); continue
+                raise
         B02,B03,B04,B05,B06,B08,B11,SCL = (bands['B02'],bands['B03'],bands['B04'],bands['B05'],
                                            bands['B06'],bands['B08'],bands['B11'],bands['SCL'])
         cloud_mask = np.isin(SCL, list(P.SCL_MASK)) if SCL.size else np.zeros(DST_SHAPE, bool)

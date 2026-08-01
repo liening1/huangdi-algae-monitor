@@ -392,17 +392,18 @@ def compute(date=None, roi="town"):
         "rev": 0,
     }
 
-    # 渲染用数组（已裁剪到 ROI；外部置 0 以便瓦片透明）
+    # 渲染用数组：真彩底图显示完整网格（不裁剪，避免"饼干模"碎裂）；
+    # 检测图层(NDCI/bloom/water)仍裁剪到 clip_mask 以约束显示范围
     from PIL import Image as _PILImage
     rgb = np.stack([B04, B03, B02], 0); rgb = np.clip(rgb, 0, 0.4)
     rgb = np.nan_to_num(rgb, nan=0.0)
     rgb_s = np.transpose(P.stretch_truecolor(rgb), (1, 2, 0))
-    rgb_clipped = rgb_s.copy().astype("uint8"); rgb_clipped[~clip_mask] = 0
+    rgb_full = rgb_s.copy().astype("uint8")          # 完整网格，不裁剪
     ndci_disp = NDCI.astype("float32").copy(); ndci_disp[~clip_mask] = 0.0
 
     combo = {
         "key": combo_key_of(date, roi), "date": scene_date, "roi": roi,
-        "rgb": rgb_clipped, "ndci": ndci_disp,
+        "rgb": rgb_full, "ndci": ndci_disp,
         "water": water_new, "bloom": bloom,
         "bloomml": bloom_ml, "bloommlp": bloom_prob,
         "old": (water_old & clip_mask),

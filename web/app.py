@@ -102,6 +102,15 @@ COMBOS = {}
 _RM = 6378137.0
 def _mx(lon): return math.radians(lon) * _RM
 def _my(lat): return math.log(math.tan(math.pi/4 + math.radians(lat)/2)) * _RM
+
+def _stretch_safe(rgb, pmin=10, pmax=98):
+    """真彩拉伸（pmin=10 而非默认 2）：避免把插值区/暗区压成纯黑"""
+    out = rgb.astype(np.float32)
+    for i in range(3):
+        lo, hi = np.percentile(rgb[i], (pmin, pmax))
+        if hi > lo:
+            out[i] = np.clip((rgb[i] - lo) / (hi - lo), 0, 1)
+    return (out * 255).clip(0, 255).astype(np.uint8)
 BBOX_MERC = (_mx(BBOX[0]), _my(BBOX[1]), _mx(BBOX[2]), _my(BBOX[3]))
 
 def _gcj_shift(lon, lat):
@@ -484,7 +493,9 @@ def compute(date=None, roi="town"):
     from PIL import Image as _PILImage
     rgb = np.stack([B04, B03, B02], 0); rgb = np.clip(rgb, 0.05, 0.4)  # 下限 0.05 避免云阴影/插值区被拉成纯黑
     rgb = np.nan_to_num(rgb, nan=0.0)
-    rgb_s = np.transpose(P.stretch_truecolor(rgb), (1, 2, 0))
+    # ★ 自定义拉伸（pmin=10 而非默认 2）：避免把插值区/云阴影压成纯黑
+    #   默认 pmin=2 太激进，连 0.15 都映射到 0；pmin=10 让中间灰 (~128) 可见
+    rgb_s = np.transpose(_stretch_safe(rgb), (1, 2, 0))
     rgb_full = rgb_s.copy().astype("uint8")          # 完整网格，不裁剪
     ndci_disp = NDCI.astype("float32").copy(); ndci_disp[~clip_mask] = 0.0
 

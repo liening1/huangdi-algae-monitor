@@ -38,7 +38,7 @@ import app as A  # web/app.py（提供 compute / render_combo_tile / discover_da
 
 # ---------------------------------------------------------------- 瓦片枚举
 def tiles_intersecting(z):
-    """正确的墨卡托重叠判定（瓦片与 bbox 任意相交即收），返回 [(z,x,y), ...]。"""
+    """WGS84 瓦片枚举：返回与 bbox 相交的 [(z, x_wgs, y_wgs), ...]。"""
     n = 2 ** z
     RM = 6378137.0
     mx = lambda lon: math.radians(lon) * RM
@@ -66,23 +66,57 @@ def tiles_intersecting(z):
     return out
 
 
-def _wgs_to_gcj_tile(z, x_wgs, y_wgs):
-    """WGS84 瓦片坐标 → GCJ-02 瓦片坐标。
-    build_static 用 WGS 枚举瓦片后，生成 GCJ 瓦片时需转换坐标，
-    否则 render_combo_tile(gcj=True) 会做错误的逆变换。"""
+def gcj_tiles_intersecting(z):
+    """GCJ-02 瓦片枚举：直接在 GCJ 空间计算与 bbox 相交的瓦片。
+    
+    ★ 关键：不能从 WGS 瓦片坐标逐个转换（_wgs_to_gcj_tile），因为：
+      GCJ 是非线性变换，WGS 网格 → GCJ 后不再是对齐的矩形网格，
+      会导致：缺失瓦片（前端请求 404）+ 已生成瓦片位置偏移 → 图像割裂。
+    
+    正确做法：把 BBOX 四角转到 GCJ 空间，在 GCJ 网格中直接枚举。
+    """
     n = 2 ** z
-    def _lat(yy):
-        return math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * yy / n))))
-    # WGS 瓦片中心点
-    c_lon = (x_wgs + 0.5) / n * 360 - 180
-    c_lat = _lat(y_wgs + 0.5)
-    # 正向 GCJ 偏移
-    dLon, dLat = A._gcj_shift(c_lon, c_lat)
-    c_lon_g, c_lat_g = c_lon + dLon, c_lat + dLat
-    # 转回瓦片坐标（取整，覆盖同一区域）
-    x_g = int((c_lon_g + 180) / 360 * n)
-    y_g = int((1 - math.asinh(math.tan(math.radians(c_lat_g))) / math.pi) / 2 * n)
-    return x_g, y_g
+    RM = 6378137.0
+    mx = lambda lon: math.radians(lon) * RM
+    my = lambda lat: math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)) * RM
+
+    # BBOX 四角 → GCJ 空间
+    gcj_corners = [
+        (A.BBOX[0] + A._gcj_shift(A.BBOX[0], A.BBOX[1])[0],
+         A.BBOX[1] + A._gcj_shift(A.BBOX[0], A.BBOX[1])[1]),
+        (A.BBOX[2] + A._gcj_shift(A.BBOX[2], A.BBOX[1])[0],
+         A.BBOX[1] + A._gcj_shift(A.BBOX[2], A.BBOX[1])[1]),
+        (A.BBOX[0] + A._gcj_shift(A.BBOX[0], A.BBOX[3])[0],
+         A.BBOX[3] + A._gcj_shift(A.BBOX[0], A.BBOX[3])[1]),
+        (A.BBOX[2] + A._gcj_shift(A.BBOX[2], A.BBOX[3])[0],
+         A.BBOX[3] + A._gcj_shift(A.BBOX[2], A.BBOX[3])[1]),
+    ]
+    g_lons = [c[0] for c in gcj_corners]
+    g_lats = [c[1] for c in gcj_corners]
+    gbox = (min(g_lons), min(g_lats), max(g_lons), max(g_lats))
+
+    # GCJ 空间的墨卡托范围
+    GM = (mx(gbox[0]), my(gbox[1]), mx(gbox[2]), my(gbox[3]))
+
+    def mb_gcj(zz, x, y):
+        lon0 = x / zz * 360 - 180
+        lon1 = (x + 1) / zz * 360 - 180
+        lat = lambda yy: math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * yy / zz))))
+        return (mx(lon0), my(lat(y)), mx(lon1), my(lat(y + 1)))
+
+    def tr_g(lat):
+        return (1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * n
+
+    out = []
+    xs = range(int((gbox[0] + 180) / 360 * n) - 1, int((gbox[2] + 180) / 360 * n) + 2)
+    yN_g, yS_g = tr_g(gbox[3]), tr_g(gbox[1])
+    ys = range(int(min(yN_g, yS_g)) - 1, int(max(yN_g, yS_g)) + 2)
+    for x in xs:
+        for y in ys:
+            w, nn, e, s = mb_gcj(n, x, y)
+            if w < GM[2] and e > GM[0] and nn > GM[1] and s < GM[3]:
+                out.append((z, x, y))
+    return out
 
 
 def _roi_label(roi):
@@ -132,16 +166,18 @@ def step_build_combos():
         json.dump(stats,                open(os.path.join(cdir, "result.json"), "w"),     ensure_ascii=False, indent=2)
 
         # 离线渲染瓦片（WGS + GCJ 两套）
-        # ★ GCJ 瓦片必须用 GCJ 坐标（而非 WGS 坐标），否则 render_combo_tile
-        #   的 GCJ 逆变换会做双重偏移。_wgs_to_gcj_tile 做正向转换。
+        # ★ WGS 和 GCJ 各自独立枚举：WGS 在 WGS84 空间，GCJ 在 GCJ-02 空间
+        #   不能用 _wgs_to_gcj_tile 逐个转换（非线性→网格错位+缺失瓦片）
         jobs = []
         for z in range(ZMIN, ZMAX + 1):
-            cells = tiles_intersecting(z)
-            for (zz, x, y) in cells:
-                x_gcj, y_gcj = _wgs_to_gcj_tile(zz, x, y)
+            wgs_cells = tiles_intersecting(z)
+            gcj_cells = gcj_tiles_intersecting(z)
+            for (zz, x, y) in wgs_cells:
                 for layer in LAYERS:
                     jobs.append((combo, layer, zz, x, y, False, OUT))
-                    jobs.append((combo, layer, zz, x_gcj, y_gcj, True, OUT))
+            for (zz, x, y) in gcj_cells:
+                for layer in LAYERS:
+                    jobs.append((combo, layer, zz, x, y, True, OUT))
         done = 0
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
             for ok in ex.map(_render_one, jobs):

@@ -273,12 +273,10 @@ def _build_composite():
                 col[np.isnan(col)] = col_mean
         # 第 3 轮：仍残留（全图某行某列交点都 NaN）用全图均值
         out[np.isnan(out)] = global_mean
-        # ★ 关键：填充区域用 75 百分位（必然落在 75% → 拉伸后约 191 亮灰）
-        #   固定值 0.30 仍可能被深色图像拉伸成深灰，用百分位更鲁棒
-        p75_val = float(np.nanpercentile(arr, 75))
-        if not np.isfinite(p75_val):
-            p75_val = 0.30
-        out[nan_mask] = p75_val
+        # ★ 关键：填充区域固定值 0.38（接近 clip 上限 0.4，必然拉伸到亮灰 ~240）
+        #   之前用 75 百分位/中位数/固定 0.30 都失败——暗图的百分位太低；
+        #   固定高值 0.38 在任何图像下都能保证填充区可见（亮灰）
+        out[nan_mask] = 0.38
         return out
     for k in keys:
         comp[k] = _fill_nan_simple(comp[k])

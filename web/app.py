@@ -276,6 +276,8 @@ def _build_composite():
         # ★ 关键：填充区域固定值 0.38（接近 clip 上限 0.4，必然拉伸到亮灰 ~240）
         #   之前用 75 百分位/中位数/固定 0.30 都失败——暗图的百分位太低；
         #   固定高值 0.38 在任何图像下都能保证填充区可见（亮灰）
+        import sys as _sys
+        print(f"[fill] {arr.shape} nan={nan_mask.sum()} fill=0.38", file=_sys.stderr, flush=True)
         out[nan_mask] = 0.38
         return out
     for k in keys:

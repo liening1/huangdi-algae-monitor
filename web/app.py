@@ -163,6 +163,11 @@ def _load_bands(item, date_tag):
         'B05': rb(hrefs['rededge1']), 'B06': rb(hrefs['rededge2']), 'B08': rb(hrefs['nir']),
         'B11': rb(hrefs['swir16']), 'SCL': rb(hrefs['scl'], P.Resampling.nearest, 0).astype(int),
     }
+    # ★ 无数据掩膜：S2 COG 在图幅外/缺失区常返回反射率 0（而非 NaN），
+    #   median 后仍是 0 → 拉伸成纯黑，造成底图边角“黑块/分裂”。
+    #   这里把 0(及负)统一转 NaN，使无效区能被正确识别并在瓦片渲染中透明处理。
+    for k in ['B02', 'B03', 'B04', 'B05', 'B06', 'B08', 'B11']:
+        bands[k][bands[k] <= 0] = np.nan
     save = {k: bands[k] for k in ['B02','B03','B04','B05','B06','B08','B11','SCL']}
     np.savez(cache, **save)
     return bands, dst_transform, dst_shape, dst_bounds
@@ -216,6 +221,7 @@ def _build_composite():
     keys = ['B02','B03','B04','B05','B06','B08','B11']
     stacks = {k: [] for k in keys}
     used = []
+    coverage = np.zeros(DST_SHAPE, bool)   # S2 图幅实际覆盖区(union)，用于区分“有数据角落”与“图幅外”
     for f in feats:
         dt = f["properties"]["datetime"][:10].replace("-", "")
         b = None
@@ -232,6 +238,7 @@ def _build_composite():
                 print("  [skip]", f["id"], e); break
         if b is None:
             continue
+        coverage |= ~np.isnan(b['B04'])   # 该景图幅覆盖区(0→NaN 已标记无数据)，union 累积
         scl = b['SCL']
         clear = ~np.isin(scl, list(P.SCL_MASK)) if scl.size else np.zeros(DST_SHAPE, bool)
         _latest_raw = {k: b[k].astype(np.float32).copy() for k in keys}  # 未掩膜��始值
@@ -270,12 +277,16 @@ def _build_composite():
         return out
     for k in keys:
         comp[k] = _fill_nan_simple(comp[k])
+        # ★ 图幅外(无任一景覆盖)的角落保持 NaN，不参与 inpaint 平填，
+        #   交由瓦片渲染设为透明，避免出现“黑块/均匀带”分裂感
+        comp[k][~coverage] = np.nan
     meta = {
         "n_scenes": len(used),
         "dates": used,
         "latest_date": latest_date,
         "latest_id": latest["id"],
         "latest_cloud": float(latest["properties"]["eo:cloud_cover"]),
+        "coverage": coverage,
     }
     _COMPOSITE_CACHE[(start, end)] = (comp, meta)
     return comp, meta
@@ -493,6 +504,7 @@ def compute(date=None, roi="town"):
     combo = {
         "key": combo_key_of(date, roi), "date": scene_date, "roi": roi,
         "data_bbox": data_bbox,
+        "valid": valid_any,   # 有效数据掩膜(NaN/无数据区=False)，瓦片渲染用于透明
         "rgb": rgb_full, "ndci": ndci_disp,
         "water": water_new, "bloom": bloom,
         "bloomml": bloom_ml, "bloommlp": bloom_prob,
@@ -723,8 +735,16 @@ def render_combo_tile(combo, layer, z, x, y, gcj, tiles_root):
         src = np.transpose(combo["rgb"], (2, 0, 1)).astype("uint8")
         dst = np.zeros((3, 256, 256), dtype="uint8")
         reproject(src, dst, resampling=Resampling.bilinear, **RW)
-        # 真彩底图强制完全不透明（即使暗区/云阴影也可见，保证连续图）
-        mask = np.full((256, 256), 255, dtype="uint8")
+        # ★ alpha = 有效数据掩膜：S2 图幅外/无数据区(含瓦片越界)设为透明，
+        #   不再填充纯黑。这样底图边角无黑块，缺失区显示页面底色(深色)。
+        valid = combo.get("valid")
+        if valid is not None:
+            src_v = valid.astype("uint8")[None, :, :]
+            dst_v = np.zeros((1, 256, 256), dtype="uint8")
+            reproject(src_v, dst_v, resampling=Resampling.nearest, **RW)
+            mask = (dst_v[0] > 0).astype("uint8") * 255
+        else:
+            mask = np.full((256, 256), 255, dtype="uint8")
         _PILImage.fromarray(np.dstack([dst[0], dst[1], dst[2], mask]), "RGBA").save(out_path, "WEBP", quality=78, method=4)
     elif layer == "ndci":
         nd = combo["ndci"].astype("float32")

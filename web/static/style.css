@@ -50,6 +50,9 @@ a{color:inherit;text-decoration:none}
 .orb-c{width:40vw;height:40vw;left:22vw;bottom:-16vw;
   background:radial-gradient(circle at 45% 45%,rgba(147,222,213,.36),rgba(147,222,213,0) 66%)}
 
+/* 地图容器底色：卫星底图缺失/透明区显示为深色(与主题一致)，避免白底突兀 */
+.leaflet-container{background:#0b1020}
+
 /* 细颗粒噪点已移除（mix-blend-mode 全屏重绘开销大，影响地图交互流畅度） */
 
 /* ---------- 导航（液态玻璃） ---------- */

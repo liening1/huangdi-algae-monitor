@@ -203,6 +203,7 @@ def _build_composite():
         print("   -", f["properties"]["datetime"][:10],
               "cloud=%.1f%%" % f["properties"]["eo:cloud_cover"], f["id"])
 
+    _latest_raw = None  # 最新景的原始（未掩膜）波段，用作 NaN 回填
     keys = ['B02','B03','B04','B05','B06','B08','B11']
     stacks = {k: [] for k in keys}
     used = []
@@ -224,15 +225,26 @@ def _build_composite():
             continue
         scl = b['SCL']
         clear = ~np.isin(scl, list(P.SCL_MASK)) if scl.size else np.zeros(DST_SHAPE, bool)
+        _latest_raw = {k: b[k].astype(np.float32).copy() for k in keys}  # 未掩膜��始值
         for k in keys:
             arr = b[k].astype(np.float32).copy()
             arr[~clear] = np.nan
             stacks[k].append(arr)
         used.append(f["properties"]["datetime"][:10])
     comp = {}
+    latest_raw = None  # 最新景的原始波段（未云掩膜），用作 NaN 回退
     for k in keys:
-        comp[k] = (np.nanmedian(np.stack(stacks[k], 0), 0)
-                   if stacks[k] else np.full(DST_SHAPE, np.nan, np.float32))
+        if stacks[k]:
+            med = np.nanmedian(np.stack(stacks[k], 0), 0)
+            comp[k] = med
+        else:
+            comp[k] = np.full(DST_SHAPE, np.nan, np.float32)
+    # ★ NaN 回填：用最新景原始波段（未掩膜）填补合成空洞
+    #   - stacks[k] 里的值已云掩膜为 NaN，但原始波段 _latest_raw 是干净的
+    #   - 当所有景都是云时，nanmedian 给出 NaN，用原始值兜底避免中间空洞
+    if _latest_raw is not None:
+        for k in keys:
+            comp[k] = np.where(np.isnan(comp[k]), _latest_raw[k], comp[k])
     meta = {
         "n_scenes": len(used),
         "dates": used,
@@ -326,6 +338,20 @@ def compute(date=None, roi="town"):
         SCL = None
         valid = ~np.isnan(B04)
 
+    # ★ 有效数据边界：S2 场景实际覆盖范围(可能小于网格 BBOX)，
+    #   用于瓦片渲染缩小显示区域，避免出现两块/空洞
+    valid_any = (~np.isnan(B04)) | (~np.isnan(B03))
+    if valid_any.any():
+        _rows = np.where(valid_any.any(axis=1))[0]
+        _cols = np.where(valid_any.any(axis=0))[0]
+        _r0, _r1 = _rows.min(), _rows.max() + 1
+        _c0, _c1 = _cols.min(), _cols.max() + 1
+        lon_min, lat_max = DST_TRANSFORM * (_c0, _r0)   # 左上角 → (lon, lat)
+        lon_max, lat_min = DST_TRANSFORM * (_c1, _r1)   # 右下角 → (lon, lat)
+        data_bbox = (lon_min, lat_min, lon_max, lat_max)
+    else:
+        data_bbox = BBOX
+
     scene_id   = meta["latest_id"]
     scene_date = meta["latest_date"]
     cloud      = meta["latest_cloud"]
@@ -402,6 +428,7 @@ def compute(date=None, roi="town"):
         "composite": date is None,
         "roi": "huangdi_town" if roi in ("town", None) else "5km_buffer",
         "bbox": [BBOX[0], BBOX[1], BBOX[2], BBOX[3]],
+        "data_bbox": [data_bbox[0], data_bbox[1], data_bbox[2], data_bbox[3]],
         "water_ha": round(ha(n_new), 1),
         "water_old_ha": round(ha(n_old), 1),
         "water_gain_ha": round(ha(n_new - n_old), 1),
@@ -438,6 +465,7 @@ def compute(date=None, roi="town"):
 
     combo = {
         "key": combo_key_of(date, roi), "date": scene_date, "roi": roi,
+        "data_bbox": data_bbox,
         "rgb": rgb_full, "ndci": ndci_disp,
         "water": water_new, "bloom": bloom,
         "bloomml": bloom_ml, "bloommlp": bloom_prob,
@@ -657,6 +685,13 @@ def render_combo_tile(combo, layer, z, x, y, gcj, tiles_root):
     lon1 = (x + 1) / n * 360 - 180
     lat = lambda yy: math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * yy / n))))
     mb = (_mx(lon0), _my(lat(y)), _mx(lon1), _my(lat(y + 1)))   # (w, n, e, s)
+    # ★ 与有效数据区相交判定：超出 data_bbox 的瓦片直接输出透明（露出底图）
+    db = combo.get("data_bbox", BBOX)
+    dbm = (_mx(db[0]), _my(db[3]), _mx(db[2]), _my(db[1]))
+    if not (mb[0] < dbm[2] and mb[2] > dbm[0] and mb[1] > dbm[1] and mb[3] < dbm[3]):
+        from PIL import Image as _PImg
+        _PImg.new("RGBA", (256, 256), (0, 0, 0, 0)).save(out_path, "WEBP" if ext == ".webp" else "PNG")
+        return out_path
     dt = P.fb(*mb, 256, 256)
     if gcj:
         st = P.fb(BBOX[0] + GCJ_DLON, BBOX[1] + GCJ_DLAT,

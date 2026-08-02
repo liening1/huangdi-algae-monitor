@@ -696,8 +696,8 @@ def render_combo_tile(combo, layer, z, x, y, gcj, tiles_root):
         src = np.transpose(combo["rgb"], (2, 0, 1)).astype("uint8")
         dst = np.zeros((3, 256, 256), dtype="uint8")
         reproject(src, dst, resampling=Resampling.bilinear, **RW)
-        # 有数据的区域不透明显示真彩；无数据区域透明露出底图（避免黑块）
-        mask = ((dst.sum(0)) > 0).astype("uint8") * 255
+        # 真彩底图强制完全不透明（即使暗区/云阴影也可见，保证连续图）
+        mask = np.full((256, 256), 255, dtype="uint8")
         _PILImage.fromarray(np.dstack([dst[0], dst[1], dst[2], mask]), "RGBA").save(out_path, "WEBP", quality=78, method=4)
     elif layer == "ndci":
         nd = combo["ndci"].astype("float32")

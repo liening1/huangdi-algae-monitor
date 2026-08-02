@@ -685,15 +685,6 @@ def render_combo_tile(combo, layer, z, x, y, gcj, tiles_root):
     lon1 = (x + 1) / n * 360 - 180
     lat = lambda yy: math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * yy / n))))
     mb = (_mx(lon0), _my(lat(y)), _mx(lon1), _my(lat(y + 1)))   # (w, n, e, s)
-    # ★ 与有效数据区相交判定：超出 data_bbox 的瓦片直接输出透明（露出底图）
-    #   dbm=(west, north_merc, east, south_merc)  →  mb=(tile_w, tile_n, tile_e, tile_s)
-    #   纬度方向：mb[1]=tile_north(高Y) 应 < dbm[1]=data_north(高Y)；mb[3]=tile_south(低Y) 应 > dbm[3]=data_south(低Y)
-    db = combo.get("data_bbox", BBOX)
-    dbm = (_mx(db[0]), _my(db[3]), _mx(db[2]), _my(db[1]))
-    if not (mb[0] < dbm[2] and mb[2] > dbm[0] and mb[1] < dbm[1] and mb[3] > dbm[3]):
-        from PIL import Image as _PImg
-        _PImg.new("RGBA", (256, 256), (0, 0, 0, 0)).save(out_path, "WEBP" if ext == ".webp" else "PNG")
-        return out_path
     dt = P.fb(*mb, 256, 256)
     if gcj:
         st = P.fb(BBOX[0] + GCJ_DLON, BBOX[1] + GCJ_DLAT,

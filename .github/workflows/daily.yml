@@ -39,10 +39,20 @@ jobs:
           GDAL_HTTP_LOW_SPEED_TIME: "30"
         run: python3 build_static.py
 
+      - name: 确保 dist/ 可被完整部署（覆盖仓库级 .gitignore 的 /* 白名单）
+        run: |
+          # 仓库 .gitignore 用 /* 白名单策略（防止 17GB 卫星数据入库），
+          # 但 dist/ 是纯静态输出，需要全部文件都部署。
+          # peaceiris/actions-gh-pages 在 publish_dir 内执行 git add --all，
+          # 会继承上层 .gitignore → 99% 瓦片被忽略。
+          # 解决：在 dist/ 内写一个允许全部文件的 .gitignore
+          echo "# 静态站输出：全部文件都需要部署" > dist/.gitignore
+
       - name: 部署 dist/ 到 gh-pages 分支
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./dist
           publish_branch: gh-pages
+          force_orphan: true
           commit_message: "每日数据更新：${{ github.run_number }}（$(date -u +%Y-%m-%d)）"

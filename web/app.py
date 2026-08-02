@@ -155,7 +155,8 @@ def _gcj_inverse(lon_gcj, lat_gcj, iterations=20):
 
 
 def _tile_bounds(z, x, y, gcj=False):
-    """计算瓦片 (z,x,y) 的墨卡托边界 (w,n,e,s)。
+    """计算瓦片 (z,x,y) 的墨卡托边界 (west, south, east, north)。
+    ★ 顺序必须与 rasterio.transform.from_bounds(west, south, east, north, ...) 一致。
     gcj=True 时：(x,y) 为 GCJ-02 瓦片网格坐标（高德底图），
     先逆变换四角到 WGS84 再算墨卡托，保证与源数据(EPSG:4326)对齐。"""
     n = 2 ** z
@@ -163,23 +164,24 @@ def _tile_bounds(z, x, y, gcj=False):
         return math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * yy / n))))
     if gcj:
         # 瓦片四角在 GCJ-02 空间的经纬度
-        lon0_g = x / n * 360 - 180
-        lon1_g = (x + 1) / n * 360 - 180
-        lat0_g = _lat(y + 1)   # 北
-        lat1_g = _lat(y)       # 南
+        lon0_g = x / n * 360 - 180      # 西
+        lon1_g = (x + 1) / n * 360 - 180  # 东
+        latN_g = _lat(y)                # 北（tile 顶部行 = y）
+        latS_g = _lat(y + 1)            # 南（tile 底部行 = y+1）
         # 四角分别逆变换到 WGS84（GCJ 非线性，不能只偏移中心）
         c_wgs = [_gcj_inverse(lo, la)
-                 for lo, la in [(lon0_g, lat0_g), (lon1_g, lat0_g),
-                                (lon0_g, lat1_g), (lon1_g, lat1_g)]]
+                 for lo, la in [(lon0_g, latN_g), (lon1_g, latN_g),
+                                (lon0_g, latS_g), (lon1_g, latS_g)]]
         lons_w = [c[0] for c in c_wgs]
         lats_w = [c[1] for c in c_wgs]
-        lon0, lon1 = min(lons_w), max(lons_w)
-        lat0, lat1 = max(lats_w), min(lats_w)   # lat0=北, lat1=南
+        lon_w, lon_e = min(lons_w), max(lons_w)
+        lat_s, lat_n = min(lats_w), max(lats_w)   # lat_s=南, lat_n=北
     else:
-        lon0 = x / n * 360 - 180
-        lon1 = (x + 1) / n * 360 - 180
-        lat0, lat1 = _lat(y + 1), _lat(y)
-    return (_mx(lon0), _my(lat0), _mx(lon1), _my(lat1))  # (w, n, e, s)
+        lon_w = x / n * 360 - 180
+        lon_e = (x + 1) / n * 360 - 180
+        lat_s, lat_n = _lat(y + 1), _lat(y)       # 南, 北
+    # ★ from_bounds 顺序: (west, south, east, north)
+    return (_mx(lon_w), _my(lat_s), _mx(lon_e), _my(lat_n))
 
 # =====================================================================
 # 核心分析函数 —— 直接复用 s2pipe 的已验证函数
@@ -703,9 +705,10 @@ def _prob_to_png(prob, water, fp):
                                              int(m.group(4)), int(m.group(5)), int(m.group(6)))
         gcj = (prefix == "tiles_gcj")
         mb = _tile_bounds(z, x, y, gcj)
-        # 相交判定：瓦片与 bbox 任意重叠即渲染（mb[1]=瓦片北界, mb[3]=瓦片南界）
+        # 相交判定：瓦片与 bbox 任意重叠即渲染
+        # mb = (west, south, east, north)，BBOX_MERC 同序
         if not (mb[0] < BBOX_MERC[2] and mb[2] > BBOX_MERC[0]
-                and mb[1] > BBOX_MERC[1] and mb[3] < BBOX_MERC[3]):
+                and mb[1] < BBOX_MERC[3] and mb[3] > BBOX_MERC[1]):
             return self._send_png(self._transparent_tile())
         try:
             combo = _get_combo(combo_key)

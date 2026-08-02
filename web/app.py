@@ -239,12 +239,34 @@ def _build_composite():
             comp[k] = med
         else:
             comp[k] = np.full(DST_SHAPE, np.nan, np.float32)
-    # ★ NaN 回填：用最新景原始波段（未掩膜）填补合成空洞
-    #   - stacks[k] 里的值已云掩膜为 NaN，但原始波段 _latest_raw 是干净的
-    #   - 当所有景都是云时，nanmedian 给出 NaN，用原始值兜底避免中间空洞
-    if _latest_raw is not None:
-        for k in keys:
-            comp[k] = np.where(np.isnan(comp[k]), _latest_raw[k], comp[k])
+    # ★ NaN 空洞填充：行方向均值 → 列方向均值 → 全图均值（逐级兜底）
+    def _fill_nan_simple(arr):
+        nan_mask = np.isnan(arr)
+        if not nan_mask.any():
+            return arr
+        if not (~nan_mask).any():
+            return np.full_like(arr, 0.1)
+        global_mean = float(np.nanmean(arr))
+        if not np.isfinite(global_mean):
+            global_mean = 0.1
+        out = arr.copy()
+        # 第 1 轮：用每行非 NaN 均值填该行 NaN
+        for i in range(out.shape[0]):
+            row = out[i]
+            if np.isnan(row).any() and not np.isnan(row).all():
+                row_mean = float(np.nanmean(row))
+                row[np.isnan(row)] = row_mean
+        # 第 2 轮：残留 NaN（整行都是 NaN）用每列均值填
+        for j in range(out.shape[1]):
+            col = out[:, j]
+            if np.isnan(col).any() and not np.isnan(col).all():
+                col_mean = float(np.nanmean(col))
+                col[np.isnan(col)] = col_mean
+        # 第 3 轮：仍残留（全图某行某列交点都 NaN）用全图均值
+        out[np.isnan(out)] = global_mean
+        return out
+    for k in keys:
+        comp[k] = _fill_nan_simple(comp[k])
     meta = {
         "n_scenes": len(used),
         "dates": used,

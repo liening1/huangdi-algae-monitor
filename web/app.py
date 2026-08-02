@@ -140,6 +140,47 @@ def _gcj_shift(lon, lat):
 _cx, _cy = (BBOX[0]+BBOX[2])/2, (BBOX[1]+BBOX[3])/2
 GCJ_DLON, GCJ_DLAT = _gcj_shift(_cx, _cy)
 
+
+def _gcj_inverse(lon_gcj, lat_gcj, iterations=20):
+    """GCJ-02 → WGS84 近似逆变换（迭代法）。
+    GCJ 偏移量级约 300~500m，迭代 20 次精度 < 0.01m。
+    ★ 关键用途：前端高德底图发出的瓦片 (z,x,y) 是 GCJ-02 网格坐标，
+      后端必须先逆变换到 WGS84 才能正确裁切源数据。"""
+    wLon, wLat = lon_gcj, lat_gcj
+    for _ in range(iterations):
+        dLon, dLat = _gcj_shift(wLon, wLat)
+        wLon = lon_gcj - dLon
+        wLat = lat_gcj - dLat
+    return wLon, wLat
+
+
+def _tile_bounds(z, x, y, gcj=False):
+    """计算瓦片 (z,x,y) 的墨卡托边界 (w,n,e,s)。
+    gcj=True 时：(x,y) 为 GCJ-02 瓦片网格坐标（高德底图），
+    先逆变换四角到 WGS84 再算墨卡托，保证与源数据(EPSG:4326)对齐。"""
+    n = 2 ** z
+    def _lat(yy):
+        return math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * yy / n))))
+    if gcj:
+        # 瓦片四角在 GCJ-02 空间的经纬度
+        lon0_g = x / n * 360 - 180
+        lon1_g = (x + 1) / n * 360 - 180
+        lat0_g = _lat(y + 1)   # 北
+        lat1_g = _lat(y)       # 南
+        # 四角分别逆变换到 WGS84（GCJ 非线性，不能只偏移中心）
+        c_wgs = [_gcj_inverse(lo, la)
+                 for lo, la in [(lon0_g, lat0_g), (lon1_g, lat0_g),
+                                (lon0_g, lat1_g), (lon1_g, lat1_g)]]
+        lons_w = [c[0] for c in c_wgs]
+        lats_w = [c[1] for c in c_wgs]
+        lon0, lon1 = min(lons_w), max(lons_w)
+        lat0, lat1 = max(lats_w), min(lats_w)   # lat0=北, lat1=南
+    else:
+        lon0 = x / n * 360 - 180
+        lon1 = (x + 1) / n * 360 - 180
+        lat0, lat1 = _lat(y + 1), _lat(y)
+    return (_mx(lon0), _my(lat0), _mx(lon1), _my(lat1))  # (w, n, e, s)
+
 # =====================================================================
 # 核心分析函数 —— 直接复用 s2pipe 的已验证函数
 # =====================================================================
@@ -617,13 +658,9 @@ class Handler(BaseHTTPRequestHandler):
         return "application/octet-stream"
 
     # ---------- XYZ 瓦片服务（B 方案：放大锐利 + 超分上采样） ----------
+    # ★ 复用模块级 _tile_bounds（含 GCJ 逆变换），不再需要实例方法版本
     def _mercator_bounds(self, z, x, y):
-        n = 2 ** z
-        lon0 = x / n * 360 - 180
-        lon1 = (x + 1) / n * 360 - 180
-        def _lat(yy):
-            return math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * yy / n))))
-        return (_mx(lon0), _my(_lat(y + 1)), _mx(lon1), _my(_lat(y)))
+        return _tile_bounds(z, x, y, False)  # 兼容旧接口（相交判定用 WGS84 即可）
 
     def _transparent_tile(self):
         from PIL import Image as _PILImage
@@ -665,7 +702,7 @@ def _prob_to_png(prob, water, fp):
         prefix, combo_key, layer, z, x, y = (m.group(1), m.group(2), m.group(3),
                                              int(m.group(4)), int(m.group(5)), int(m.group(6)))
         gcj = (prefix == "tiles_gcj")
-        mb = self._mercator_bounds(z, x, y)
+        mb = _tile_bounds(z, x, y, gcj)
         # 相交判定：瓦片与 bbox 任意重叠即渲染（mb[1]=瓦片北界, mb[3]=瓦片南界）
         if not (mb[0] < BBOX_MERC[2] and mb[2] > BBOX_MERC[0]
                 and mb[1] > BBOX_MERC[1] and mb[3] < BBOX_MERC[3]):
@@ -723,17 +760,12 @@ def render_combo_tile(combo, layer, z, x, y, gcj, tiles_root):
     out_path = os.path.join(out_dir, str(y) + ext)
     if os.path.exists(out_path):
         return out_path
-    n = 2 ** z
-    lon0 = x / n * 360 - 180
-    lon1 = (x + 1) / n * 360 - 180
-    lat = lambda yy: math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * yy / n))))
-    mb = (_mx(lon0), _my(lat(y)), _mx(lon1), _my(lat(y + 1)))   # (w, n, e, s)
+    # ★ 用统一的 _tile_bounds 计算：gcj=True 时自动做 GCJ→WGS84 逆变换
+    mb = _tile_bounds(z, x, y, gcj)
     dt = P.fb(*mb, 256, 256)
-    if gcj:
-        st = P.fb(BBOX[0] + GCJ_DLON, BBOX[1] + GCJ_DLAT,
-                  BBOX[2] + GCJ_DLON, BBOX[3] + GCJ_DLAT, NCOL, NROW)
-    else:
-        st = DST_TRANSFORM
+    # ★ 源数据始终用 WGS84 变换（DST_TRANSFORM），不再对 GCJ 做均匀偏移。
+    #   GCJ→WGS84 的纠正已在 mb（目标瓦片边界）中完成。
+    st = DST_TRANSFORM
     RW = dict(src_transform=st, src_crs="EPSG:4326", dst_transform=dt, dst_crs="EPSG:3857")
     if layer == "rgb":
         src = np.transpose(combo["rgb"], (2, 0, 1)).astype("uint8")

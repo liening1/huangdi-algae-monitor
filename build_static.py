@@ -66,6 +66,25 @@ def tiles_intersecting(z):
     return out
 
 
+def _wgs_to_gcj_tile(z, x_wgs, y_wgs):
+    """WGS84 瓦片坐标 → GCJ-02 瓦片坐标。
+    build_static 用 WGS 枚举瓦片后，生成 GCJ 瓦片时需转换坐标，
+    否则 render_combo_tile(gcj=True) 会做错误的逆变换。"""
+    n = 2 ** z
+    def _lat(yy):
+        return math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * yy / n))))
+    # WGS 瓦片中心点
+    c_lon = (x_wgs + 0.5) / n * 360 - 180
+    c_lat = _lat(y_wgs + 0.5)
+    # 正向 GCJ 偏移
+    dLon, dLat = A._gcj_shift(c_lon, c_lat)
+    c_lon_g, c_lat_g = c_lon + dLon, c_lat + dLat
+    # 转回瓦片坐标（取整，覆盖同一区域）
+    x_g = int((c_lon_g + 180) / 360 * n)
+    y_g = int((1 - math.asinh(math.tan(math.radians(c_lat_g))) / math.pi) / 2 * n)
+    return x_g, y_g
+
+
 def _roi_label(roi):
     return "黄埭镇边界" if roi in ("town", None) else "5km缓冲(GEE)"
 
@@ -113,13 +132,16 @@ def step_build_combos():
         json.dump(stats,                open(os.path.join(cdir, "result.json"), "w"),     ensure_ascii=False, indent=2)
 
         # 离线渲染瓦片（WGS + GCJ 两套）
+        # ★ GCJ 瓦片必须用 GCJ 坐标（而非 WGS 坐标），否则 render_combo_tile
+        #   的 GCJ 逆变换会做双重偏移。_wgs_to_gcj_tile 做正向转换。
         jobs = []
         for z in range(ZMIN, ZMAX + 1):
             cells = tiles_intersecting(z)
             for (zz, x, y) in cells:
+                x_gcj, y_gcj = _wgs_to_gcj_tile(zz, x, y)
                 for layer in LAYERS:
                     jobs.append((combo, layer, zz, x, y, False, OUT))
-                    jobs.append((combo, layer, zz, x, y, True, OUT))
+                    jobs.append((combo, layer, zz, x_gcj, y_gcj, True, OUT))
         done = 0
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
             for ok in ex.map(_render_one, jobs):

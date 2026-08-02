@@ -479,7 +479,7 @@ def compute(date=None, roi="town"):
     # 渲染用数组：真彩底图显示完整网格（不裁剪，避免"饼干模"碎裂）；
     # 检测图层(NDCI/bloom/water)仍裁剪到 clip_mask 以约束显示范围
     from PIL import Image as _PILImage
-    rgb = np.stack([B04, B03, B02], 0); rgb = np.clip(rgb, 0, 0.4)
+    rgb = np.stack([B04, B03, B02], 0); rgb = np.clip(rgb, 0.05, 0.4)  # 下限 0.05 避免云阴影/插值区被拉成纯黑
     rgb = np.nan_to_num(rgb, nan=0.0)
     rgb_s = np.transpose(P.stretch_truecolor(rgb), (1, 2, 0))
     rgb_full = rgb_s.copy().astype("uint8")          # 完整网格，不裁剪

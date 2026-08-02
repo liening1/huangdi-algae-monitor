@@ -248,37 +248,25 @@ def _build_composite():
             comp[k] = med
         else:
             comp[k] = np.full(DST_SHAPE, np.nan, np.float32)
-    # ★ NaN 空洞填充：行方向均值 → 列方向均值 → 全图均值（逐级兜底）
+    # ★ NaN 空洞修复：最近有效像元邻域修复（nearest-neighbor inpaint）。
+    #   之前用固定/统计值平涂（0.15/0.30/0.38/中位数…）都会在缺失带形成
+    #   一块均匀明暗带 → 影像被"劈成两半"。该带本质是多景在该纬度带全部有云，
+    #   nanmedian 后成 NaN。正确做法是把周围真实地物反射率复制到空洞里，
+    #   使缺失带与相邻影像纹理连续，肉眼不再有断层/分裂感。
     def _fill_nan_simple(arr):
+        from scipy import ndimage
         nan_mask = np.isnan(arr)
         if not nan_mask.any():
             return arr
         if not (~nan_mask).any():
-            return np.full_like(arr, 0.1)
-        global_mean = float(np.nanmean(arr))
-        if not np.isfinite(global_mean):
-            global_mean = 0.1
+            return np.full_like(arr, 0.15)
         out = arr.copy()
-        # 第 1 轮：用每行非 NaN 均值填该行 NaN
-        for i in range(out.shape[0]):
-            row = out[i]
-            if np.isnan(row).any() and not np.isnan(row).all():
-                row_mean = float(np.nanmean(row))
-                row[np.isnan(row)] = row_mean
-        # 第 2 轮：残留 NaN（整行都是 NaN）用每列均值填
-        for j in range(out.shape[1]):
-            col = out[:, j]
-            if np.isnan(col).any() and not np.isnan(col).all():
-                col_mean = float(np.nanmean(col))
-                col[np.isnan(col)] = col_mean
-        # 第 3 轮：仍残留（全图某行某列交点都 NaN）用全图均值
-        out[np.isnan(out)] = global_mean
-        # ★ 关键：填充区域固定值 0.38（接近 clip 上限 0.4，必然拉伸到亮灰 ~240）
-        #   之前用 75 百分位/中位数/固定 0.30 都失败——暗图的百分位太低；
-        #   固定高值 0.38 在任何图像下都能保证填充区可见（亮灰）
-        import sys as _sys
-        print(f"[fill] {arr.shape} nan={nan_mask.sum()} fill=0.38", file=_sys.stderr, flush=True)
-        out[nan_mask] = 0.38
+        inds = ndimage.distance_transform_edt(
+            nan_mask, return_distances=False, return_indices=True)
+        # 每个 NaN 像元取"最近的有效像元"的反射率；有效像元索引指向自身→不变
+        out = out[tuple(inds)]
+        print(f"[fill] shape={arr.shape} nan={int(nan_mask.sum())} "
+              f"-> nearest-neighbor inpaint", flush=True)
         return out
     for k in keys:
         comp[k] = _fill_nan_simple(comp[k])

@@ -264,12 +264,9 @@ def _build_composite():
                 col[np.isnan(col)] = col_mean
         # 第 3 轮：仍残留（全图某行某列交点都 NaN）用全图均值
         out[np.isnan(out)] = global_mean
-        # ★ 关键：填充区域用全图中位数（必然落在 50 百分位附近 → 拉伸后约 127 中灰）
-        #   比固定值 0.22 更鲁棒（不受 lo 漂移影响），保证视觉连续
-        median_val = float(np.nanmedian(arr))
-        if not np.isfinite(median_val):
-            median_val = 0.15
-        out[nan_mask] = median_val
+        # ★ 关键：填充区域固定值 0.30（必然高于 stretch 的 lo 百分位，映射到亮灰 ~200）
+        #   中位数会等于 lo→黑，所以必须用固定高值
+        out[nan_mask] = 0.30
         return out
     for k in keys:
         comp[k] = _fill_nan_simple(comp[k])

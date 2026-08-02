@@ -264,6 +264,9 @@ def _build_composite():
                 col[np.isnan(col)] = col_mean
         # 第 3 轮：仍残留（全图某行某列交点都 NaN）用全图均值
         out[np.isnan(out)] = global_mean
+        # ★ 关键：填充区域加最小亮度 0.15（避免被 stretch_truecolor 百分位拉伸成黑块）
+        #   0.15 在 (0.05,0.4) clip 后 → 拉伸后约中灰 (~128)，视觉上连续
+        out[nan_mask] = np.maximum(out[nan_mask], 0.15)
         return out
     for k in keys:
         comp[k] = _fill_nan_simple(comp[k])

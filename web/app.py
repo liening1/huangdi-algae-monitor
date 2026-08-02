@@ -114,18 +114,22 @@ def _stretch_safe(rgb, pmin=10, pmax=98):
 BBOX_MERC = (_mx(BBOX[0]), _my(BBOX[1]), _mx(BBOX[2]), _my(BBOX[3]))
 
 def _gcj_shift(lon, lat):
-    """与前端一致的 WGS84->GCJ-02 偏移（近似恒定，用于高德瓦片对齐）。"""
+    """与前端 wgs84ToGcj02 完全一致的 WGS84->GCJ-02 偏移（用于高德瓦片对齐）。
+    ★ 修复：必须先减去基准点 (105°E, 35°N)，与前端 app.js:61-62 一致。
+    之前漏减导致偏移量误差 ~2.2km（1950m 经度 + 1109m 纬度），影像整体偏东北。"""
     if not (73.66 < lon < 135.05 and 3.86 < lat < 53.55):
         return 0.0, 0.0
+    # ★ 与前端一致：相对 (105°E, 35°N) 的偏移多项式
+    x, y = lon - 105.0, lat - 35.0
     a = 6378245.0; ee = 0.00669342162296594323
-    dLat = -100 + 2*lon + 3*lat + 0.2*lat*lat + 0.1*lon*lat + 0.2*math.sqrt(abs(lon))
-    dLat += (20*math.sin(6*lon*math.pi) + 20*math.sin(2*lon*math.pi))*2/3
-    dLat += (20*math.sin(lat*math.pi) + 40*math.sin(lat/3*math.pi))*2/3
-    dLat += (160*math.sin(lat/12*math.pi) + 320*math.sin(lat*math.pi/30))*2/3
-    dLon = 300 + lon + 2*lat + 0.1*lon*lon + 0.1*lon*lat + 0.1*math.sqrt(abs(lon))
-    dLon += (20*math.sin(6*lon*math.pi) + 20*math.sin(2*lon*math.pi))*2/3
-    dLon += (20*math.sin(lon*math.pi) + 40*math.sin(lon/3*math.pi))*2/3
-    dLon += (150*math.sin(lon/12*math.pi) + 300*math.sin(lon/30*math.pi))*2/3
+    dLat = -100 + 2*x + 3*y + 0.2*y*y + 0.1*x*y + 0.2*math.sqrt(abs(x))
+    dLat += (20*math.sin(6*x*math.pi) + 20*math.sin(2*x*math.pi))*2/3
+    dLat += (20*math.sin(y*math.pi) + 40*math.sin(y/3*math.pi))*2/3
+    dLat += (160*math.sin(y/12*math.pi) + 320*math.sin(y*math.pi/30))*2/3
+    dLon = 300 + x + 2*y + 0.1*x*x + 0.1*x*y + 0.1*math.sqrt(abs(x))
+    dLon += (20*math.sin(6*x*math.pi) + 20*math.sin(2*x*math.pi))*2/3
+    dLon += (20*math.sin(x*math.pi) + 40*math.sin(x/3*math.pi))*2/3
+    dLon += (150*math.sin(x/12*math.pi) + 300*math.sin(x/30*math.pi))*2/3
     radLat = lat/180.0*math.pi
     magic = math.sin(radLat); magic = 1 - ee*magic*magic
     sqrtMagic = math.sqrt(magic)
@@ -277,9 +281,8 @@ def _build_composite():
         return out
     for k in keys:
         comp[k] = _fill_nan_simple(comp[k])
-        # ★ 图幅外(无任一景覆盖)的角落保持 NaN，不参与 inpaint 平填，
-        #   交由瓦片渲染设为透明，避免出现“黑块/均匀带”分裂感
-        comp[k][~coverage] = np.nan
+        # ★ 不再对"图幅外"区域 re-NaN：inpaint 已用最近邻纹理填充所有空洞（含云洞+图幅外），
+        #   整幅图连续无空隙。若强制透明则瓦片行间出现缝隙（底图露出），体验更差。
     meta = {
         "n_scenes": len(used),
         "dates": used,
@@ -504,7 +507,8 @@ def compute(date=None, roi="town"):
     combo = {
         "key": combo_key_of(date, roi), "date": scene_date, "roi": roi,
         "data_bbox": data_bbox,
-        "valid": valid_any,   # 有效数据掩膜(NaN/无数据区=False)，瓦片渲染用于透明
+        # ★ valid 全 True：inpaint 已填充所有空洞（含图幅外），瓦片完全不透明，无空隙
+        "valid": np.ones(DST_SHAPE, dtype=bool),
         "rgb": rgb_full, "ndci": ndci_disp,
         "water": water_new, "bloom": bloom,
         "bloomml": bloom_ml, "bloommlp": bloom_prob,

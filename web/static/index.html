@@ -149,7 +149,7 @@
   <div class="section-head reveal">
     <p class="kicker">METHODOLOGY</p>
     <h2>技术原理</h2>
-    <p>把"像 Google 一样干净"的水体边界，拆成可解释、可复现的四步。</p>
+    <p>水体边界的提取基于一套可解释、可复现的处理流程：</p>
   </div>
   <div class="grid">
     <div class="card reveal">
@@ -178,14 +178,14 @@
         <svg viewBox="0 0 32 32" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3l10 4v8c0 6.5-4.3 10.9-10 13-5.7-2.1-10-6.5-10-13V7z"/><path d="M11.5 15.5l3 3 6-6"/></svg>
       </div>
       <h3>权威边界核验</h3>
-      <p>检测结果与 OSM 行政边界（relation 7763011）做定位核验，水体质心须落在镇域内，确保"范围不错"。</p>
+      <p>检测结果与 OSM 行政边界（relation 7763011）做定位核验，水体质心须落在镇域内，确保监测范围准确无误。</p>
     </div>
     <div class="card card-wide reveal">
       <div class="card-ico">
         <svg viewBox="0 0 32 32" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="16" height="16" rx="3"/><path d="M16 2v3M16 27v3M2 16h3M27 16h3M7 5.5L9 7M25 5.5L23 7M7 26.5L9 25M25 26.5L23 25"/><circle cx="16" cy="16" r="3"/></svg>
       </div>
       <h3>机器学习复核</h3>
-      <p>在规则法之外，采用 <b>Otsu 自适应阈值</b>（对水体内 NDCI/FAI 自动定分割点，比固定阈值更稳健）+ <b>CMI 指数</b>（Liang 2017，依据藻蓝蛋白吸收区分蓝藻与挺水植物），输出藻华<b>概率图</b>，显著减少水草误判。方法引自 Mishra &amp; Mishra 2012、Hu 2009、Liang 2017 等期刊验证算法。</p>
+      <p>在规则法之外，采用 <b>Otsu 自适应阈值</b>（对水体内 NDCI/FAI 自动确定分割点，无需人工设定固定阈值）+ <b>CMI 指数</b>（Liang 2017，依据藻蓝蛋白吸收区分蓝藻与挺水植物），输出藻华<b>概率图</b>，降低水草误判。方法引自 Mishra &amp; Mishra 2012、Hu 2009、Liang 2017 等期刊验证算法。</p>
     </div>
   </div>
 </section>
@@ -194,8 +194,8 @@
 <section class="section" id="compare">
   <div class="section-head reveal">
     <p class="kicker">SENSOR COMPARISON</p>
-    <h2>传感器对比：为何回退到哨兵二号</h2>
-    <p>风云系列擅长逐时预警，但缺少蓝藻所需的红边 / 短波红外波段，且分辨率太粗；哨兵二号才是精细检测主力。</p>
+    <h2>传感器对比：为何以哨兵二号为主</h2>
+    <p>风云系列擅长逐时预警，但缺少蓝藻所需的红边 / 短波红外波段，且空间分辨率不足；哨兵二号为精细检测核心。</p>
   </div>
   <div class="table-wrap reveal">
     <table class="cmp">
@@ -208,8 +208,8 @@
         <tr><td>空间分辨率</td><td>1.25–5 km</td><td>0.5–4 km</td><td class="hl">10 / 20 m</td></tr>
         <tr><td>红边 705/740nm</td><td>✗</td><td>✗</td><td class="hl">✓</td></tr>
         <tr><td>短波红外 1610nm</td><td>✗</td><td>部分</td><td class="hl">✓（MNDWI/FAI）</td></tr>
-        <tr><td>蓝藻指数</td><td>算不了</td><td>做不了精细</td><td class="hl">NDCI/FAI/MCI 全可</td></tr>
-        <tr><td>角色定位</td><td>天气预警</td><td>逐时预警补充</td><td class="hl">精细检测主力</td></tr>
+        <tr><td>蓝藻指数</td><td>不支持</td><td>不支持精细检测</td><td class="hl">NDCI/FAI/MCI 全可</td></tr>
+        <tr><td>角色定位</td><td>天气预警</td><td>逐时预警补充</td><td class="hl">精细检测核心</td></tr>
       </tbody>
     </table>
   </div>

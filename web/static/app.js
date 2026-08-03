@@ -270,7 +270,14 @@ function renderTrendChart() {
     data.forEach((d, i) => { pts += `${xFor(i).toFixed(1)},${yFor(d[m.key]).toFixed(1)} `; });
     svg += `<polyline fill="none" stroke="${m.color}" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" points="${pts.trim()}"/>`;
     data.forEach((d, i) => {
-      svg += `<circle cx="${xFor(i).toFixed(1)}" cy="${yFor(d[m.key]).toFixed(1)}" r="3.4" fill="#fff" stroke="${m.color}" stroke-width="2"/>`;
+      const val = m.key === "water" ? d[m.key].toFixed(1) : d[m.key].toFixed(2);
+      let tip;
+      if (m.key === "water") {
+        tip = `水体面积 ${val} ha\n${d.date}\n口径：当前影像 MNDWI 判水 ∩ JRC 长期出现率≥10% 的水面，已裁至监测范围`;
+      } else {
+        tip = `${m.label} ${val} ha\n${d.date}`;
+      }
+      svg += `<circle cx="${xFor(i).toFixed(1)}" cy="${yFor(d[m.key]).toFixed(1)}" r="3.4" fill="#fff" stroke="${m.color}" stroke-width="2"><title>${tip}</title></circle>`;
     });
   });
   svg += `</svg>`;
@@ -284,6 +291,12 @@ function renderTrendChart() {
   note.innerHTML = `监测范围：<b>${roiName}</b> · 共 <b>${n}</b> 期（${data[0].date} ~ ${last.date}）` +
     ` · 规则藻华峰值 <b>${peak.bloom.toFixed(2)} ha</b>（${peak.date}）` +
     ` · <b>${warn}</b> 期判为预警。`;
+
+  const def = $("trend-def");
+  if (def) {
+    def.innerHTML = `水体面积 = 当前影像下 <b>MNDWI 判水</b> ∩ <b>JRC 长期出现率≥10%</b> 的水面，已裁至监测范围；` +
+      `为藻华检测的基底掩膜，逐期跳动反映实际水面变化（非水位、非多年均值）。`;
+  }
 }
 
 // 点位时序：给定 WGS 经纬度，跨各单景期判断是否落在藻华斑块内

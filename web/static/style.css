@@ -283,6 +283,8 @@ table.cmp th.hl{background:rgba(0,113,227,.12);color:var(--accent)}
 .trend-chart .val{fill:var(--fg-2);font-size:10.5px;font-weight:600;font-family:inherit}
 .trend-note{margin-top:14px;font-size:13px;color:var(--muted);line-height:1.6}
 .trend-note b{color:var(--fg)}
+.trend-def{margin-top:7px;font-size:12px;color:var(--muted);line-height:1.65;border-top:1px dashed rgba(0,0,0,.10);padding-top:8px}
+.trend-def b{color:var(--fg-2)}
 
 /* ---------- 地图点击弹窗（液态玻璃） ---------- */
 .glass-pop .leaflet-popup-content-wrapper{border-radius:18px;

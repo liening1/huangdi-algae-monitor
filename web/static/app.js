@@ -303,7 +303,8 @@ function renderTrendChart() {
 function pointBloomSeries(lon, lat) {
   const out = [];
   if (!MANIFEST) return out;
-  const keys = Object.keys(MANIFEST.combos).filter((k) => MANIFEST.combos[k].date);
+  const keys = Object.keys(MANIFEST.combos)
+    .filter((k) => MANIFEST.combos[k].date && MANIFEST.combos[k].roi === ROI);
   keys.sort((a, b) => MANIFEST.combos[a].scene_date.localeCompare(MANIFEST.combos[b].scene_date));
   keys.forEach((k) => {
     const fc = ALL_BLOOM[k], meta = MANIFEST.combos[k];
@@ -330,18 +331,21 @@ function sparkSVG(series) {
   const plotW = W - L - R, plotH = H - T - B;
   const n = series.length;
   if (!n) return "";
-  let maxV = 1;
-  series.forEach((s) => { if (s.area > maxV) maxV = s.area; });
-  maxV = Math.ceil(maxV * 1.15);
+  // 点位时序画"是否藻华 + NDCI 强度"，不画 patch 面积（点位尺度无意义且≈0）
+  const FLOOR = 0.15;                                  // 命中但缺 NDCI 时的可见高度
+  const valOf = (s) => (s.inside ? (s.ndci != null ? s.ndci : FLOOR) : 0);
+  let maxV = 0.2;
+  series.forEach((s) => { const v = valOf(s); if (v > maxV) maxV = v; });
+  maxV = Math.ceil(maxV * 1.15 * 10) / 10;             // 留 15% 余量，按 0.1 取整
   const xFor = (i) => n === 1 ? L + plotW / 2 : L + (i / (n - 1)) * plotW;
   const yFor = (v) => T + plotH - (v / maxV) * plotH;
   let svg = `<svg viewBox="0 0 ${W} ${H}" aria-label="点位藻华历史">`;
   let line = "";
-  series.forEach((s, i) => { line += `${xFor(i).toFixed(1)},${yFor(s.area).toFixed(1)} `; });
+  series.forEach((s, i) => { line += `${xFor(i).toFixed(1)},${yFor(valOf(s)).toFixed(1)} `; });
   svg += `<polyline fill="none" stroke="var(--bloom)" stroke-width="2" stroke-linejoin="round" points="${line.trim()}"/>`;
   series.forEach((s, i) => {
     if (s.inside) {
-      svg += `<circle cx="${xFor(i).toFixed(1)}" cy="${yFor(s.area).toFixed(1)}" r="3.6" fill="var(--bloom)"/>`;
+      svg += `<circle cx="${xFor(i).toFixed(1)}" cy="${yFor(valOf(s)).toFixed(1)}" r="3.6" fill="var(--bloom)"/>`;
     } else {
       svg += `<circle cx="${xFor(i).toFixed(1)}" cy="${yFor(0).toFixed(1)}" r="2.6" fill="none" stroke="rgba(0,0,0,.25)" stroke-width="1.4"/>`;
     }
@@ -369,7 +373,8 @@ function featurePopup(latlng, f, layerName, color) {
   const cls = result && result.status === "预警" ? "alert" : "ok";
   html += `<span class="pop-tag ${cls}">${label}</span>`;
   if (series.length) {
-    html += `<div class="pop-spark"><div class="cap">该点位各期藻华：${hitN}/${series.length} 期检出</div>${sparkSVG(series)}</div>`;
+    const roiName = ROI === "town" ? "黄埭镇边界" : "5km缓冲(GEE)";
+    html += `<div class="pop-spark"><div class="cap">该点位各期藻华：${hitN}/${series.length} 期检出（范围：${roiName}）</div>${sparkSVG(series)}</div>`;
   }
   L.popup({ className: "glass-pop", maxWidth: 280 }).setLatLng(latlng).setContent(html).openOn(map);
 }
@@ -383,7 +388,8 @@ function pointPopup(latlng) {
   html += `<div class="kv"><span>坐标 (WGS84)</span><b>${lon.toFixed(4)}, ${lat.toFixed(4)}</b></div>`;
   html += `<div class="kv"><span>各期检出</span><b>${hitN}/${series.length} 期</b></div>`;
   if (series.length) {
-    html += `<div class="pop-spark"><div class="cap">该点位藻华历史（● 检出 / ○ 未检出）</div>${sparkSVG(series)}</div>`;
+    const roiName = ROI === "town" ? "黄埭镇边界" : "5km缓冲(GEE)";
+    html += `<div class="pop-spark"><div class="cap">该点位藻华历史（范围：${roiName}）· ● 检出/○ 未检出，高度=NDCI强度</div>${sparkSVG(series)}</div>`;
   } else {
     html += `<div class="pop-spark"><div class="cap">暂无多期数据</div></div>`;
   }

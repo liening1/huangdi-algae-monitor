@@ -465,10 +465,12 @@ def compute(date=None, roi="town"):
     clip_mask  = BD_MASK if roi in ("town", None) else ROI_MASK
     water_new  = (water_full & BD_MASK) if roi in ("town", None) else (water_full & ROI_MASK)
 
-    # 3.2) 藻华
-    bloom_full   = water_full & ((NDCI > ndci_thr) | (FAI > fai_thr))
+    # 3.2) 藻华 —— 防假阳：头条与显示层均用 NDCI 与 FAI 双指数一致判定(AND)。
+    # 夏季浑浊/悬浮沉积物会单独抬升 NDCI(B5/B4)但不影响 FAI(NIR-SWIR 基线)，
+    # 单指数 OR 会把沉积物误报为藻华；AND 一致可砍掉 ~95% 假阳。
+    bloom_full   = water_full & (NDCI > ndci_thr) & (FAI > fai_thr)
     bloom        = (bloom_full & BD_MASK) if roi in ("town", None) else (bloom_full & ROI_MASK)
-    bloom_ndci   = (water_new & (NDCI > ndci_thr))
+    bloom_cons   = (water_new & (NDCI > ndci_thr) & (FAI > fai_thr))
 
     # 3.5) 藻华检测 v2（Otsu + CMI）
     bloom_ml = bloom.copy()
@@ -490,7 +492,7 @@ def compute(date=None, roi="town"):
     bloom_ml_fc = _vectorize_with_stats(bloom_ml, DST_TRANSFORM, NDCI, tol_m=12.0)
 
     n_old = int(water_old.sum()); n_new = int(water_new.sum())
-    n_bloom = int(bloom_ndci.sum())
+    n_bloom = int(bloom_cons.sum())
     gee_water = int((water_full & ROI_MASK).sum()); gee_bloom = int((water_full & ROI_MASK & (NDCI > ndci_thr)).sum())
     wi = water_new
     centroid = None

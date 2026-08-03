@@ -29,6 +29,10 @@ let MODE = "composite";   // composite | 2026-07-26 | 2026-07-21 | 2026-06-26
 let ROI = "town";         // town（黄埭镇行政边界精确切出） | gee（5km 缓冲区，GEE 对齐）
 let MANIFEST = null;      // 静态模式：outputs/manifest.json（列出全部预计算组合）
 let COMBO = "composite_town";  // 当前组合键：composite_town / 2026-07-21_town ...
+let ALL_BLOOM = {};       // 各组合 bloom.geojson 预加载（用于点位时序点在内判断）
+let TREND = null;         // 时序趋势数据：{dates, byRoi:{town,gee}}
+let TREND_ROI = "town";
+let TREND_METRICS = { water: true, bloom: true, bloomml: false };
 
 const $ = (id) => document.getElementById(id);
 const ts = () => "?t=" + REV;
@@ -86,6 +90,61 @@ function coordsToLatLng(c) {
   return [la, lo];
 }
 
+// GCJ-02 -> WGS84 逆变换（高德底图下点击坐标需转回 WGS 再与 geojson 比对）
+function gcj02ToWgs84(lon, lat) {
+  if (outOfChina(lon, lat)) return [lon, lat];
+  const a = 6378245.0, ee = 0.00669342162296594323;
+  let dLat = _tLat(lon - 105.0, lat - 35.0);
+  let dLon = _tLon(lon - 105.0, lat - 35.0);
+  const radLat = lat / 180.0 * Math.PI;
+  let magic = Math.sin(radLat);
+  magic = 1 - ee * magic * magic;
+  const sqrtMagic = Math.sqrt(magic);
+  dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI);
+  dLon = (dLon * 180.0) / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
+  return [lon - dLon, lat - dLat];
+}
+// 把地图点击的 latlng（已是底图坐标系）转回 WGS84
+function clickedToWgs(latlng) {
+  const lon = latlng.lng, lat = latlng.lat;
+  return BASEMAP === "gaode" ? gcj02ToWgs84(lon, lat) : [lon, lat];
+}
+
+// ---------- 点在多边形内（ray casting，WGS84 坐标） ----------
+function pointInRing(lon, lat, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+    const hit = ((yi > lat) !== (yj > lat)) &&
+      (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi);
+    if (hit) inside = !inside;
+  }
+  return inside;
+}
+function pointInFeature(lon, lat, f) {
+  const g = f.geometry;
+  if (!g) return false;
+  if (g.type === "Polygon") {
+    if (!g.coordinates.length) return false;
+    if (pointInRing(lon, lat, g.coordinates[0])) return true;   // 忽略孔洞
+  } else if (g.type === "MultiPolygon") {
+    for (const poly of g.coordinates) {
+      if (poly.length && pointInRing(lon, lat, poly[0])) return true;
+    }
+  }
+  return false;
+}
+function centroidOf(f) {
+  const g = f.geometry;
+  let ring = null;
+  if (g.type === "Polygon") ring = g.coordinates[0];
+  else if (g.type === "MultiPolygon") ring = g.coordinates[0][0];
+  if (!ring || !ring.length) return null;
+  let x = 0, y = 0;
+  for (const p of ring) { x += p[0]; y += p[1]; }
+  return [x / ring.length, y / ring.length];
+}
+
 // ---------- 初始化 ----------
 let STATIC_MODE = false;   // true = 静态托管（GitHub Pages），无 Python 后端
 
@@ -141,6 +200,183 @@ function populateDropdowns() {
   rs.value = parts.length > 1 ? parts[1] : "town";
 }
 
+// 预加载所有组合的 bloom.geojson（点位时序需要跨期比对）
+async function loadAllCombos() {
+  if (!MANIFEST) return;
+  const keys = Object.keys(MANIFEST.combos);
+  await Promise.all(keys.map(async (k) => {
+    try {
+      const fc = await fetch("outputs/combos/" + k + "/bloom.geojson" + ts()).then((x) => x.json());
+      ALL_BLOOM[k] = fc;
+    } catch (e) { /* 个别组合缺失则跳过 */ }
+  }));
+}
+
+// ---------- 时序趋势（⑤） ----------
+function buildTrend() {
+  if (!MANIFEST) return;
+  const single = Object.values(MANIFEST.combos).filter((c) => c.date);
+  const dates = [...new Set(single.map((c) => c.scene_date))].sort();
+  const byRoi = {};
+  ["town", "gee"].forEach((roi) => {
+    byRoi[roi] = dates.map((d) => {
+      const c = single.find((x) => x.roi === roi && x.scene_date === d);
+      return c ? { date: d, water: c.water_ha, bloom: c.bloom_ha, bloomml: c.bloom_ml_ha, status: c.status } : null;
+    });
+  });
+  TREND = { dates, byRoi };
+}
+
+function renderTrendChart() {
+  const host = $("trend-chart"), note = $("trend-note");
+  if (!host || !TREND) return;
+  const W = 720, H = 300, L = 48, R = 18, T = 18, B = 42;
+  const plotW = W - L - R, plotH = H - T - B;
+  const data = TREND.byRoi[TREND_ROI].filter((d) => d);
+  const n = data.length;
+  if (!n) { host.innerHTML = ""; return; }
+
+  const metrics = [
+    { key: "water", color: "var(--water)", label: "水体面积" },
+    { key: "bloom", color: "var(--bloom)", label: "规则藻华" },
+    { key: "bloomml", color: "#ff9500", label: "ML 藻华" },
+  ].filter((m) => TREND_METRICS[m.key]);
+
+  let maxV = 1;
+  metrics.forEach((m) => data.forEach((d) => { if (d[m.key] > maxV) maxV = d[m.key]; }));
+  maxV = Math.ceil(maxV * 1.12);
+
+  const xFor = (i) => n === 1 ? L + plotW / 2 : L + (i / (n - 1)) * plotW;
+  const yFor = (v) => T + plotH - (v / maxV) * plotH;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="蓝藻面积时序趋势">`;
+  // 网格 + Y 轴标签
+  const ticks = 4;
+  for (let i = 0; i <= ticks; i++) {
+    const v = (maxV / ticks) * i;
+    const y = yFor(v);
+    svg += `<line class="grid" x1="${L}" y1="${y.toFixed(1)}" x2="${W - R}" y2="${y.toFixed(1)}"/>`;
+    svg += `<text class="tick" x="${L - 8}" y="${(y + 3.5).toFixed(1)}" text-anchor="end">${v.toFixed(0)}</text>`;
+  }
+  svg += `<text class="tick" x="${L - 8}" y="${T - 6}" text-anchor="end" style="font-weight:600">ha</text>`;
+  // X 轴标签
+  data.forEach((d, i) => {
+    svg += `<text class="tick" x="${xFor(i).toFixed(1)}" y="${H - B + 18}" text-anchor="middle">${d.date.slice(5)}</text>`;
+  });
+  svg += `<line class="axis" x1="${L}" y1="${T + plotH}" x2="${W - R}" y2="${T + plotH}"/>`;
+  // 各指标折线 + 点
+  metrics.forEach((m) => {
+    let pts = "";
+    data.forEach((d, i) => { pts += `${xFor(i).toFixed(1)},${yFor(d[m.key]).toFixed(1)} `; });
+    svg += `<polyline fill="none" stroke="${m.color}" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" points="${pts.trim()}"/>`;
+    data.forEach((d, i) => {
+      svg += `<circle cx="${xFor(i).toFixed(1)}" cy="${yFor(d[m.key]).toFixed(1)}" r="3.4" fill="#fff" stroke="${m.color}" stroke-width="2"/>`;
+    });
+  });
+  svg += `</svg>`;
+  host.innerHTML = svg;
+
+  // 说明
+  const last = data[data.length - 1];
+  const peak = data.reduce((a, b) => (b.bloom > a.bloom ? b : a), data[0]);
+  const warn = data.filter((d) => d.status === "预警").length;
+  const roiName = TREND_ROI === "town" ? "黄埭镇边界" : "5km缓冲(GEE)";
+  note.innerHTML = `监测范围：<b>${roiName}</b> · 共 <b>${n}</b> 期（${data[0].date} ~ ${last.date}）` +
+    ` · 规则藻华峰值 <b>${peak.bloom.toFixed(2)} ha</b>（${peak.date}）` +
+    ` · <b>${warn}</b> 期判为预警。`;
+}
+
+// 点位时序：给定 WGS 经纬度，跨各单景期判断是否落在藻华斑块内
+function pointBloomSeries(lon, lat) {
+  const out = [];
+  if (!MANIFEST) return out;
+  const keys = Object.keys(MANIFEST.combos).filter((k) => MANIFEST.combos[k].date);
+  keys.sort((a, b) => MANIFEST.combos[a].scene_date.localeCompare(MANIFEST.combos[b].scene_date));
+  keys.forEach((k) => {
+    const fc = ALL_BLOOM[k], meta = MANIFEST.combos[k];
+    let hit = null;
+    if (fc && fc.features) {
+      for (const f of fc.features) {
+        if (pointInFeature(lon, lat, f)) { hit = f; break; }
+      }
+    }
+    out.push({
+      date: meta.scene_date,
+      inside: !!hit,
+      area: hit ? (hit.properties.area_ha || 0) : 0,
+      ndci: hit && hit.properties.mean != null ? hit.properties.mean : null,
+      status: meta.status,
+    });
+  });
+  return out;
+}
+
+// 迷你时序 sparkline（点在多边形内命中率）
+function sparkSVG(series) {
+  const W = 248, H = 70, L = 6, R = 6, T = 8, B = 8;
+  const plotW = W - L - R, plotH = H - T - B;
+  const n = series.length;
+  if (!n) return "";
+  let maxV = 1;
+  series.forEach((s) => { if (s.area > maxV) maxV = s.area; });
+  maxV = Math.ceil(maxV * 1.15);
+  const xFor = (i) => n === 1 ? L + plotW / 2 : L + (i / (n - 1)) * plotW;
+  const yFor = (v) => T + plotH - (v / maxV) * plotH;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" aria-label="点位藻华历史">`;
+  let line = "";
+  series.forEach((s, i) => { line += `${xFor(i).toFixed(1)},${yFor(s.area).toFixed(1)} `; });
+  svg += `<polyline fill="none" stroke="var(--bloom)" stroke-width="2" stroke-linejoin="round" points="${line.trim()}"/>`;
+  series.forEach((s, i) => {
+    if (s.inside) {
+      svg += `<circle cx="${xFor(i).toFixed(1)}" cy="${yFor(s.area).toFixed(1)}" r="3.6" fill="var(--bloom)"/>`;
+    } else {
+      svg += `<circle cx="${xFor(i).toFixed(1)}" cy="${yFor(0).toFixed(1)}" r="2.6" fill="none" stroke="rgba(0,0,0,.25)" stroke-width="1.4"/>`;
+    }
+  });
+  svg += `</svg>`;
+  return svg;
+}
+
+function popupHeader(color, title) {
+  return `<h4><span class="dot" style="background:${color}"></span>${title}</h4>`;
+}
+
+// 斑块点击：属性 + 该点位各期历史
+function featurePopup(latlng, f, layerName, color) {
+  const c = centroidOf(f) || clickedToWgs(latlng);
+  const area = (f.properties.area_ha || 0);
+  const mean = f.properties.mean;
+  const series = pointBloomSeries(c[0], c[1]);
+  const hitN = series.filter((s) => s.inside).length;
+  let html = popupHeader(color, layerName + " 斑块");
+  html += `<div class="kv"><span>面积</span><b>${area.toFixed(2)} ha</b></div>`;
+  html += `<div class="kv"><span>平均 NDCI</span><b>${mean != null ? mean.toFixed(3) : "—"}</b></div>`;
+  html += `<div class="kv"><span>当前影像</span><b>${result ? result.date : "—"}</b></div>`;
+  const label = result && result.status === "预警" ? "预警" : "正常";
+  const cls = result && result.status === "预警" ? "alert" : "ok";
+  html += `<span class="pop-tag ${cls}">${label}</span>`;
+  if (series.length) {
+    html += `<div class="pop-spark"><div class="cap">该点位各期藻华：${hitN}/${series.length} 期检出</div>${sparkSVG(series)}</div>`;
+  }
+  L.popup({ className: "glass-pop", maxWidth: 280 }).setLatLng(latlng).setContent(html).openOn(map);
+}
+
+// 地图空白点击：该点位各期历史
+function pointPopup(latlng) {
+  const [lon, lat] = clickedToWgs(latlng);
+  const series = pointBloomSeries(lon, lat);
+  const hitN = series.filter((s) => s.inside).length;
+  let html = popupHeader("var(--accent)", "点位查询");
+  html += `<div class="kv"><span>坐标 (WGS84)</span><b>${lon.toFixed(4)}, ${lat.toFixed(4)}</b></div>`;
+  html += `<div class="kv"><span>各期检出</span><b>${hitN}/${series.length} 期</b></div>`;
+  if (series.length) {
+    html += `<div class="pop-spark"><div class="cap">该点位藻华历史（● 检出 / ○ 未检出）</div>${sparkSVG(series)}</div>`;
+  } else {
+    html += `<div class="pop-spark"><div class="cap">暂无多期数据</div></div>`;
+  }
+  L.popup({ className: "glass-pop", maxWidth: 280 }).setLatLng(latlng).setContent(html).openOn(map);
+}
+
 async function init() {
   const bbox = DEFAULT_BBOX;
   const center = [(bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2];
@@ -181,6 +417,9 @@ async function init() {
     COMBO = MANIFEST.default || "composite_town";
     populateDropdowns();
     await applyCombo(COMBO);
+    buildTrend();
+    renderTrendChart();
+    loadAllCombos();                 // 预加载各期 bloom（点位时序用，后台）
   } else {
     // 4) 兜底：旧扁平 result.json
     try {
@@ -194,6 +433,7 @@ async function init() {
     buildLayers(); applyResult(); applyVisibility(); renderBloom(parseFloat($("ndci-slider").value));
   }
 
+  map.on("click", (e) => pointPopup(e.latlng));   // 点击空白：点位时序查询
   $("map-loading").classList.add("hidden");
   wireControls();
 }
@@ -263,6 +503,15 @@ function buildLayers() {
     coordsToLatLng,
     style: { color: "#ff3b30", weight: 1.2, fillColor: "#ff3b30", fillOpacity: 0.45, opacity: 0.95 },
   }).addTo(map);
+  // 点击藻华 / 水体斑块：属性 + 点位时序
+  layers.bloom.on("click", (e) => {
+    if (e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
+    featurePopup(e.latlng, e.layer.feature, "藻华", "var(--bloom)");
+  });
+  layers.water.on("click", (e) => {
+    if (e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
+    featurePopup(e.latlng, e.layer.feature, "水体", "var(--water)");
+  });
 }
 
 // ---------- 重建所有叠加层（底图坐标系变化时） ----------
@@ -354,6 +603,29 @@ function wireControls() {
   }
   const bm = $("basemap");
   if (bm) { bm.value = BASEMAP; bm.addEventListener("change", () => setBasemap(bm.value)); }
+  // 时序趋势：监测范围 / 指标切换
+  const roiBox = $("trend-roi");
+  if (roiBox && TREND) {
+    roiBox.querySelectorAll(".seg-btn").forEach((b) => {
+      b.addEventListener("click", () => {
+        roiBox.querySelectorAll(".seg-btn").forEach((x) => x.classList.remove("active"));
+        b.classList.add("active");
+        TREND_ROI = b.dataset.roi;
+        renderTrendChart();
+      });
+    });
+  }
+  const metricBox = $("trend-metrics");
+  if (metricBox && TREND) {
+    metricBox.querySelectorAll(".chip").forEach((c) => {
+      c.addEventListener("click", () => {
+        const m = c.dataset.m;
+        TREND_METRICS[m] = !TREND_METRICS[m];
+        c.classList.toggle("active", TREND_METRICS[m]);
+        renderTrendChart();
+      });
+    });
+  }
   // 静态托管模式：无 Python 后端，「重新分析」禁用；但 影像模式/显示范围 下拉
   // 已变为「即时切换预计算组合」，保持可用（applyCombo 秒切不同瓦片集）。
   if (STATIC_MODE) {

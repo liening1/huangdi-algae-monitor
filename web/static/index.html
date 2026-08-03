@@ -30,6 +30,7 @@
     </a>
     <div class="nav-links">
       <a href="#map">监测地图</a>
+      <a href="#trend">时序趋势</a>
       <a href="#method">技术原理</a>
       <a href="#compare">传感器对比</a>
     </div>
@@ -116,6 +117,7 @@
           <div class="hint">仅显示 NDCI 均值 ≥ 阈值的藻华斑块</div>
           <div class="mini-stat">当前藻华：<b id="bloom-filtered">—</b> 公顷</div>
           <div class="mini-stat">ML 藻华：<b id="bloomml-area">—</b> 公顷</div>
+          <div class="hint" style="margin-top:11px;border-top:.5px solid rgba(0,0,0,.07);padding-top:10px">点击地图或藻华斑块，可查看该点位的各期藻华历史。</div>
         </div>
         <div class="panel-block">
           <div class="panel-title">影像模式</div>
@@ -141,6 +143,30 @@
         </div>
       </aside>
     </div>
+  </div>
+</section>
+
+<!-- 时序趋势 -->
+<section class="section" id="trend">
+  <div class="section-head reveal">
+    <p class="kicker">TIME SERIES</p>
+    <h2>蓝藻面积的时序演变</h2>
+    <p>基于每日哨兵二号重算的多期结果，观察水体与蓝藻面积随时间的涨落。可切换监测范围与指标。</p>
+  </div>
+  <div class="trend-card reveal">
+    <div class="trend-controls">
+      <div class="seg" id="trend-roi">
+        <button class="seg-btn active" data-roi="town">黄埭镇边界</button>
+        <button class="seg-btn" data-roi="gee">5km缓冲(GEE)</button>
+      </div>
+      <div class="chips" id="trend-metrics">
+        <button class="chip active" data-m="water"><i style="--c:var(--water)"></i>水体面积</button>
+        <button class="chip active" data-m="bloom"><i style="--c:var(--bloom)"></i>规则藻华</button>
+        <button class="chip" data-m="bloomml"><i style="--c:#ff9500"></i>ML 藻华</button>
+      </div>
+    </div>
+    <div class="trend-chart" id="trend-chart"></div>
+    <div class="trend-note" id="trend-note"></div>
   </div>
 </section>
 

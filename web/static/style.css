@@ -256,6 +256,55 @@ table.cmp th.hl{background:rgba(0,113,227,.12);color:var(--accent)}
 .footer-brand{font-size:14px;font-weight:600;color:var(--fg)}
 .footer .muted{color:var(--muted);margin-top:9px;font-size:12px;line-height:1.6}
 
+/* ---------- 时序趋势 ---------- */
+.trend-card{background:var(--glass-strong);backdrop-filter:saturate(160%) blur(20px);
+  -webkit-backdrop-filter:saturate(160%) blur(20px);
+  border:.5px solid rgba(255,255,255,.8);border-radius:var(--radius-lg);
+  padding:26px 28px 24px;box-shadow:var(--shadow-md)}
+.trend-controls{display:flex;align-items:center;justify-content:space-between;gap:18px;
+  flex-wrap:wrap;margin-bottom:18px}
+.seg{display:inline-flex;background:rgba(120,120,128,.12);border-radius:12px;padding:3px;gap:2px}
+.seg-btn{border:none;background:transparent;color:var(--fg-2);font-size:13.5px;font-weight:600;
+  padding:8px 16px;border-radius:9px;cursor:pointer;transition:all .25s var(--ease);letter-spacing:-0.01em}
+.seg-btn.active{background:#fff;color:var(--fg);box-shadow:0 2px 8px rgba(0,0,0,.10)}
+.chips{display:inline-flex;gap:8px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:7px;border:.5px solid rgba(0,0,0,.12);
+  background:rgba(255,255,255,.55);color:var(--fg-2);font-size:13px;font-weight:500;
+  padding:7px 13px;border-radius:999px;cursor:pointer;transition:all .22s var(--ease)}
+.chip i{width:9px;height:9px;border-radius:50%;background:var(--c);display:inline-block}
+.chip.active{color:var(--fg);border-color:rgba(0,0,0,.28);background:#fff;
+  box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.chip:not(.active){opacity:.5}
+.trend-chart{width:100%;overflow:hidden}
+.trend-chart svg{width:100%;height:auto;display:block}
+.trend-chart .axis{stroke:rgba(0,0,0,.10);stroke-width:1}
+.trend-chart .grid{stroke:rgba(0,0,0,.05);stroke-width:1}
+.trend-chart .tick{fill:var(--muted);font-size:11px;font-family:inherit}
+.trend-chart .val{fill:var(--fg-2);font-size:10.5px;font-weight:600;font-family:inherit}
+.trend-note{margin-top:14px;font-size:13px;color:var(--muted);line-height:1.6}
+.trend-note b{color:var(--fg)}
+
+/* ---------- 地图点击弹窗（液态玻璃） ---------- */
+.glass-pop .leaflet-popup-content-wrapper{border-radius:18px;
+  background:var(--glass-strong);backdrop-filter:saturate(180%) blur(24px);
+  -webkit-backdrop-filter:saturate(180%) blur(24px);
+  border:.5px solid rgba(255,255,255,.8);box-shadow:var(--shadow-lg)}
+.glass-pop .leaflet-popup-content{margin:16px 18px;font-family:inherit}
+.glass-pop .leaflet-popup-tip{background:var(--glass-strong);box-shadow:var(--shadow-md)}
+.glass-pop h4{font-size:14px;font-weight:700;margin-bottom:10px;letter-spacing:-0.01em;
+  display:flex;align-items:center;gap:8px}
+.glass-pop .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+.glass-pop .kv{display:flex;justify-content:space-between;gap:18px;font-size:13px;
+  padding:3px 0;color:var(--fg-2)}
+.glass-pop .kv b{font-variant-numeric:tabular-nums;color:var(--fg);font-weight:600}
+.glass-pop .pop-spark{margin-top:10px;border-top:.5px solid rgba(0,0,0,.08);padding-top:10px}
+.glass-pop .pop-spark .cap{font-size:11.5px;color:var(--muted);margin-bottom:6px}
+.glass-pop .pop-spark svg{width:100%;height:auto;display:block}
+.glass-pop .pop-tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;
+  border-radius:999px;margin-top:8px}
+.glass-pop .pop-tag.alert{background:rgba(255,59,48,.12);color:var(--bloom)}
+.glass-pop .pop-tag.ok{background:rgba(48,209,88,.14);color:var(--ok)}
+
 /* ---------- 滚动显现（含错峰） ---------- */
 .reveal{opacity:0;transform:translateY(30px);filter:blur(5px);
   transition:opacity .9s var(--spring),transform .9s var(--spring),filter .9s var(--spring)}

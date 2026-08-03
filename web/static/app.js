@@ -106,12 +106,13 @@ async function applyCombo(key) {
   const parts = key.split("_");
   MODE = parts[0];                                   // composite 或 日期
   ROI = parts.length > 1 ? parts[1] : "town";
-  const [res, water, bloom] = await Promise.all([
+  const [res, water, bloom, bd] = await Promise.all([
     fetch("outputs/combos/" + key + "/result.json" + ts()).then((x) => x.json()),
     fetch("outputs/combos/" + key + "/water.geojson" + ts()).then((x) => x.json()),
     fetch("outputs/combos/" + key + "/bloom.geojson" + ts()).then((x) => x.json()),
+    fetch("outputs/boundary.json" + ts()).then((x) => x.json()),   // 行政边界（全组合共用，顶层 outputs）
   ]);
-  result = res; waterFC = water; allBloom = bloom;
+  result = res; waterFC = water; allBloom = bloom; boundaryFC = bd;
   if (result.rev) REV = result.rev;
   rebuildOverlays();          // buildLayers + applyVisibility + renderBloom
   applyResult();

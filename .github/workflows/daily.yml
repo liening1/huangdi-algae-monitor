@@ -56,3 +56,17 @@ jobs:
           publish_branch: gh-pages
           force_orphan: true
           commit_message: "每日数据更新：${{ github.run_number }}（$(date -u +%Y-%m-%d)）"
+
+      - name: 预警推送（飞书机器人）
+        # 构建后若任一组合 status=预警，则推送飞书。未配置 FEISHU_WEBHOOK 时自动跳过。
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: |
+          WH="$FEISHU_WEBHOOK"
+          if [ -z "$WH" ]; then echo "未配置 FEISHU_WEBHOOK，跳过预警推送"; exit 0; fi
+          ALERT=$(jq -r '[to_entries[] | select(.value.status=="预警")] | length' dist/outputs/manifest.json)
+          if [ "$ALERT" = "0" ] || [ -z "$ALERT" ]; then echo "无预警组合，跳过推送"; exit 0; fi
+          TEXT=$(jq -r '["【黄埭镇蓝藻监测 · 预警】"] + ([to_entries[] | select(.value.status=="预警")] | sort_by(.value.scene_date) | map("· \(.key)：水体 \(.value.water_ha)ha / 藻华 \(.value.bloom_ha)ha / ML藻华 \(.value.bloom_ml_ha)ha（\(.value.scene_date)，云量\(.value.cloud // 0)%）")) + ["站点：https://liening1.github.io/huangdi-algae-monitor/"] | join("\n")' dist/outputs/manifest.json)
+          PAYLOAD=$(jq -n --arg t "$TEXT" '{msg_type:"text",content:{text:$t}}')
+          echo "推送预警（$ALERT 个组合）..."
+          curl -fsS -X POST "$WH" -H "Content-Type: application/json" -d "$PAYLOAD"

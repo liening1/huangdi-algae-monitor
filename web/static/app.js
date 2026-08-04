@@ -300,26 +300,71 @@ function renderTrendChart() {
 }
 
 // 点位时序：给定 WGS 经纬度，跨各单景期判断是否落在藻华斑块内
-function pointBloomSeries(lon, lat) {
+// 按需懒加载某组合的 bloom.geojson（点位时序用），带缓存与容错。
+// 点击时才拉取，避免后台预加载（loadAllCombos）失败/未就绪时整功能“全空”。
+async function ensureComboBloom(k) {
+  if (ALL_BLOOM[k]) return ALL_BLOOM[k];
+  try {
+    const fc = await fetch("outputs/combos/" + k + "/bloom.geojson" + ts()).then((x) => x.json());
+    ALL_BLOOM[k] = fc;
+    return fc;
+  } catch (e) {
+    console.warn("bloom 懒加载失败:", k, e);
+    return null;
+  }
+}
+
+// ---------- 点位命中判定（稳健版） ----------
+// 同时用「点在多边形内」与「最近斑块质心距离 ≤ 容差」两种判定，
+// 并对 WGS84 点与原始地图坐标（GCJ-02 帧）双坐标系各算一次取最小距离，
+// 彻底规避：① 后台预加载失败导致全空；② 高德纠偏方向万一相反导致全部落空；
+// ③ 小斑块点不中 polygon 边缘的问题。
+function haversineM(lon1, lat1, lon2, lat2) {
+  const R = 6371000;
+  const r1 = lat1 * Math.PI / 180, r2 = lat2 * Math.PI / 180;
+  const dLat = (lat2 - lat1) * Math.PI / 180, dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(r1) * Math.cos(r2) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+const POINT_TOL_M = 800;   // 点位命中容差（米）：覆盖坐标纠偏偏移 + 斑块尺寸
+
+async function pointBloomSeries(lon, lat, altLon, altLat) {
   const out = [];
   if (!MANIFEST) return out;
   const keys = Object.keys(MANIFEST.combos)
     .filter((k) => MANIFEST.combos[k].date && MANIFEST.combos[k].roi === ROI);
   keys.sort((a, b) => MANIFEST.combos[a].scene_date.localeCompare(MANIFEST.combos[b].scene_date));
+  // 按需懒加载缺失组合（容错），不再依赖后台预加载 ALL_BLOOM
+  await Promise.all(keys.map((k) => ensureComboBloom(k)));
   keys.forEach((k) => {
     const fc = ALL_BLOOM[k], meta = MANIFEST.combos[k];
-    let hit = null;
+    let hit = null, minD = Infinity;
     if (fc && fc.features) {
       for (const f of fc.features) {
-        if (pointInFeature(lon, lat, f)) { hit = f; break; }
+        const insidePoly =
+          pointInFeature(lon, lat, f) ||
+          (altLon != null && pointInFeature(altLon, altLat, f));
+        // 最近质心距离（双坐标系取小）
+        const c = centroidOf(f);
+        let d = Infinity;
+        if (c) {
+          const dWgs = haversineM(lon, lat, c[0], c[1]);
+          const dAlt = altLon != null ? haversineM(altLon, altLat, c[0], c[1]) : Infinity;
+          d = Math.min(dWgs, dAlt);
+        }
+        if (insidePoly || (c && d <= POINT_TOL_M)) {
+          if (d < minD) { minD = d; hit = f; }
+        }
       }
     }
+    const inside = !!hit;
     out.push({
       date: meta.scene_date,
-      inside: !!hit,
-      area: hit ? (hit.properties.area_ha || 0) : 0,
-      ndci: hit && hit.properties.mean != null ? hit.properties.mean : null,
+      inside,
+      area: inside ? (hit.properties.area_ha || 0) : 0,
+      ndci: inside && hit.properties.mean != null ? hit.properties.mean : null,
       status: meta.status,
+      dist: hit ? minD : null,
     });
   });
   return out;
@@ -358,42 +403,51 @@ function popupHeader(color, title) {
   return `<h4><span class="dot" style="background:${color}"></span>${title}</h4>`;
 }
 
-// 斑块点击：属性 + 该点位各期历史
-function featurePopup(latlng, f, layerName, color) {
-  const c = centroidOf(f) || clickedToWgs(latlng);
-  const area = (f.properties.area_ha || 0);
-  const mean = f.properties.mean;
-  const series = pointBloomSeries(c[0], c[1]);
-  const hitN = series.filter((s) => s.inside).length;
-  let html = popupHeader(color, layerName + " 斑块");
-  html += `<div class="kv"><span>面积</span><b>${area.toFixed(2)} ha</b></div>`;
-  html += `<div class="kv"><span>平均 NDCI</span><b>${mean != null ? mean.toFixed(3) : "—"}</b></div>`;
-  html += `<div class="kv"><span>当前影像</span><b>${result ? result.date : "—"}</b></div>`;
-  const label = result && result.status === "预警" ? "预警" : "正常";
-  const cls = result && result.status === "预警" ? "alert" : "ok";
-  html += `<span class="pop-tag ${cls}">${label}</span>`;
-  if (series.length) {
-    const roiName = ROI === "town" ? "黄埭镇边界" : "5km缓冲(GEE)";
-    html += `<div class="pop-spark"><div class="cap">该点位各期藻华：${hitN}/${series.length} 期检出（范围：${roiName}）</div>${sparkSVG(series)}</div>`;
-  }
-  L.popup({ className: "glass-pop", maxWidth: 280 }).setLatLng(latlng).setContent(html).openOn(map);
-}
-
-// 地图空白点击：该点位各期历史
-function pointPopup(latlng) {
+// 统一点位查询弹窗：点击藻华/水体斑块或地图空白处都走这里。
+// patch: 可选 {feature, name, color}，用于展示斑块自身面积/NDCI；为空则只做点位时序。
+// 关键：先开“查询中”弹窗，再 await 跨期查询（按需懒加载缺失组合），避免白屏 / 依赖后台预加载。
+async function showPointQuery(latlng, patch) {
   const [lon, lat] = clickedToWgs(latlng);
-  const series = pointBloomSeries(lon, lat);
+  const headColor = patch ? patch.color : "var(--accent)";
+  const title = patch ? (patch.name + " 斑块") : "点位查询";
+  const roiName = ROI === "town" ? "黄埭镇边界" : "5km缓冲(GEE)";
+  const patchBlock = (pf) => {
+    if (!pf) return "";
+    const area = (pf.area_ha || 0);
+    const mean = pf.mean;
+    return `<div class="kv"><span>面积</span><b>${area.toFixed(2)} ha</b></div>` +
+           `<div class="kv"><span>平均 NDCI</span><b>${mean != null ? mean.toFixed(3) : "—"}</b></div>`;
+  };
+  // 1) 立即开“查询中”弹窗
+  const pop = L.popup({ className: "glass-pop", maxWidth: 280 }).setLatLng(latlng).openOn(map);
+  pop.setContent(
+    popupHeader(headColor, title) +
+    patchBlock(patch && patch.feature ? patch.feature.properties : null) +
+    `<div class="kv"><span>坐标 (WGS84)</span><b>${lon.toFixed(4)}, ${lat.toFixed(4)}</b></div>` +
+    `<div class="kv"><span>各期检出</span><b>查询中…</b></div>`
+  );
+  // 2) 跨期查询（按需加载缺失组合）；alt 为原始地图坐标，双坐标系兜底纠偏方向
+  const alt = [latlng.lng, latlng.lat];
+  const series = await pointBloomSeries(lon, lat, alt[0], alt[1]);
   const hitN = series.filter((s) => s.inside).length;
-  let html = popupHeader("var(--accent)", "点位查询");
-  html += `<div class="kv"><span>坐标 (WGS84)</span><b>${lon.toFixed(4)}, ${lat.toFixed(4)}</b></div>`;
-  html += `<div class="kv"><span>各期检出</span><b>${hitN}/${series.length} 期</b></div>`;
-  if (series.length) {
-    const roiName = ROI === "town" ? "黄埭镇边界" : "5km缓冲(GEE)";
-    html += `<div class="pop-spark"><div class="cap">该点位藻华历史（范围：${roiName}）· ● 检出/○ 未检出，高度=NDCI强度</div>${sparkSVG(series)}</div>`;
-  } else {
-    html += `<div class="pop-spark"><div class="cap">暂无多期数据</div></div>`;
+  const cap = patch
+    ? `该点位各期藻华：${hitN}/${series.length} 期检出（范围：${roiName}）`
+    : `该点位藻华历史（范围：${roiName}）· ● 检出/○ 未检出，高度=NDCI强度`;
+  let nearestNote = "";
+  if (!patch && hitN === 0) {
+    let md = Infinity, mdDate = "";
+    series.forEach((s) => { if (s.dist != null && s.dist < md) { md = s.dist; mdDate = s.date; } });
+    if (md < Infinity) nearestNote = `<div class="kv"><span>最近藻华</span><b>约 ${Math.round(md)} m（${mdDate}）</b></div>`;
   }
-  L.popup({ className: "glass-pop", maxWidth: 280 }).setLatLng(latlng).setContent(html).openOn(map);
+  pop.setContent(
+    popupHeader(headColor, title) +
+    patchBlock(patch && patch.feature ? patch.feature.properties : null) +
+    `<div class="kv"><span>坐标 (WGS84)</span><b>${lon.toFixed(4)}, ${lat.toFixed(4)}</b></div>` +
+    `<div class="kv"><span>各期检出</span><b>${hitN}/${series.length} 期</b></div>` +
+    nearestNote +
+    `<div class="pop-spark"><div class="cap">${cap}</div>${series.length ? sparkSVG(series) : "<div class=\"cap\">暂无多期数据</div>"}</div>`
+  );
+  pop.update();
 }
 
 async function init() {
@@ -452,7 +506,7 @@ async function init() {
     buildLayers(); applyResult(); applyVisibility(); renderBloom(parseFloat($("ndci-slider").value));
   }
 
-  map.on("click", (e) => pointPopup(e.latlng));   // 点击空白：点位时序查询
+  map.on("click", (e) => showPointQuery(e.latlng));   // 点击空白：点位时序查询
   $("map-loading").classList.add("hidden");
   wireControls();
 }
@@ -522,14 +576,16 @@ function buildLayers() {
     coordsToLatLng,
     style: { color: "#ff3b30", weight: 1.2, fillColor: "#ff3b30", fillOpacity: 0.45, opacity: 0.95 },
   }).addTo(map);
-  // 点击藻华 / 水体斑块：属性 + 点位时序
+  // 点击藻华 / 水体斑块：属性 + 点位时序（e.layer.feature 在 canvas 模式下可能为空，故容错）
   layers.bloom.on("click", (e) => {
     if (e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
-    featurePopup(e.latlng, e.layer.feature, "藻华", "var(--bloom)");
+    const pf = e.layer && e.layer.feature ? e.layer.feature : null;
+    showPointQuery(e.latlng, pf ? { feature: pf, name: "藻华", color: "var(--bloom)" } : null);
   });
   layers.water.on("click", (e) => {
     if (e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
-    featurePopup(e.latlng, e.layer.feature, "水体", "var(--water)");
+    const pf = e.layer && e.layer.feature ? e.layer.feature : null;
+    showPointQuery(e.latlng, pf ? { feature: pf, name: "水体", color: "var(--water)" } : null);
   });
 }
 

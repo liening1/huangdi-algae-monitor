@@ -1,0 +1,55 @@
+{
+  "ready": true,
+  "scene_id": "S2C_51RTQ_20260731_0_L2A",
+  "date": "2026-07-31",
+  "cloud": 3.4,
+  "n_scenes": 1,
+  "scene_dates": [
+    "2026-07-31"
+  ],
+  "composite": false,
+  "roi": "huangdi_town",
+  "bbox": [
+    120.4717559,
+    31.386768,
+    120.61064,
+    31.477232
+  ],
+  "data_bbox": [
+    120.4717559,
+    31.386768,
+    120.61064,
+    31.477232
+  ],
+  "water_ha": 135.9,
+  "water_old_ha": 340.3,
+  "water_gain_ha": -204.3,
+  "bloom_ha": 1.84,
+  "bloom_px": 184,
+  "bloom_features": 91,
+  "bloom_ml_ha": 0.82,
+  "bloom_ml_px": 82,
+  "bloom_ml_features": 30,
+  "ml_enabled": true,
+  "status": "正常",
+  "centroid": [
+    120.54353,
+    31.43317
+  ],
+  "in_boundary_ha": 135.9,
+  "in_boundary_pct": 100.0,
+  "gee_water_ha": 270.8,
+  "gee_bloom_ha": 117.78,
+  "ndci_p50": 0.064,
+  "ndci_p90": 0.212,
+  "ndci_max": 0.483,
+  "fai_p50": -0.0248,
+  "mci_p50": 0.017,
+  "thresholds": {
+    "ndci": 0.1,
+    "fai": 0.005,
+    "mci": 0.005,
+    "jrc": 10
+  },
+  "rev": 0
+}

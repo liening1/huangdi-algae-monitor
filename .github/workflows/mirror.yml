@@ -2,7 +2,7 @@ name: 同步国内镜像 (Coding/Gitee Pages)
 
 # 把 gh-pages（已构建好的完整静态站点）强推到国内可直连的静态托管，
 # 解决 GitHub Pages 在国内访问受限的问题。
-# 默认被 secrets.CODING_TOKEN 门控：未配置前不会运行，配置后全自动。
+# 默认被 secrets.CODING_TOKEN / secrets.GITEE_TOKEN 门控：未配置前不会运行，配置后全自动。
 
 on:
   workflow_dispatch: {}
@@ -32,13 +32,14 @@ jobs:
         run: |
           set -e
           [ -z "$REPO" ] && { echo "未配置 CODING_REPO，跳过"; exit 0; }
+          path="${REPO#*//}"; USER="${path#*/}"; USER="${USER%%/*}"   # 从 e.coding.net/<team>/... 提取 <team>
           rm -rf .git
           git init -q
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add -A
           git commit -q -m "mirror: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push -f "https://$TOKEN@${REPO#https://}" "HEAD:$BRANCH"
+          git push -f "https://$USER:$TOKEN@${REPO#https://}" "HEAD:$BRANCH"
 
       - name: 推送到 Gitee Pages
         if: ${{ secrets.GITEE_TOKEN != '' }}
@@ -49,10 +50,11 @@ jobs:
         run: |
           set -e
           [ -z "$REPO" ] && { echo "未配置 GITEE_REPO，跳过"; exit 0; }
+          path="${REPO#*//}"; USER="${path#*/}"; USER="${USER%%/*}"   # 从 gitee.com/<user>/... 提取 <user>
           rm -rf .git
           git init -q
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add -A
           git commit -q -m "mirror: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push -f "https://$TOKEN@${REPO#https://}" "HEAD:$BRANCH"
+          git push -f "https://$USER:$TOKEN@${REPO#https://}" "HEAD:$BRANCH"

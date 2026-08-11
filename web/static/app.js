@@ -40,7 +40,7 @@ const ts = () => "?t=" + REV;
 // ---------- 国内镜像切换（解决 GitHub Pages 在国内访问受限） ----------
 // 在此填入国内镜像站点地址（如 Coding Pages：https://<user>.coding.me/huangdi-algae-monitor/
 // 或 Gitee Pages：https://<user>.gitee.io/huangdi-algae-monitor/）。留空则不启用提示。
-const CN_MIRROR = "";
+const CN_MIRROR = "https://liening1.gitee.io/huangdi-algae-monitor/";
 const GH_SITE = "https://liening1.github.io/huangdi-algae-monitor/";
 (function initMirror() {
   try {

@@ -14,6 +14,9 @@
 #   CODING_TOKEN / CODING_REPO   推送到 Coding（部署分支 coding-pages）
 #   GITEE_TOKEN  / GITEE_REPO    推送到 Gitee（部署分支即推送分支，默认 master）
 # 二者可同时配置，会依次推送。
+#
+# 鉴权说明：Gitee 要求 HTTPS 基础鉴权用「用户名:令牌」格式
+#   （https://<user>:<token>@gitee.com/...），仅用令牌作用户名会 401。
 # ============================================================
 set -euo pipefail
 
@@ -47,7 +50,10 @@ push_to() {
   [ -z "$repo" ] && { echo "==> 未配置 ${label} 仓库，跳过"; return; }
   echo "==> 推送到 ${label}: $repo (分支 $BRANCH)"
   # 形如 e.coding.net/team/proj/repo.git 或 gitee.com/user/repo.git
-  local auth="${token}@${repo#https://}"
+  # 提取团队/用户名（Gitee 需「用户名:令牌」基础鉴权，否则 401）
+  local hostpath="${repo#https://}"
+  local user="${hostpath#*/}"; user="${user%%/*}"
+  local auth="${user}:${token}@${hostpath}"
   git push -f "https://${auth}" "HEAD:${BRANCH}"
   echo "==> ${label} 推送完成"
 }

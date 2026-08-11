@@ -2,7 +2,10 @@ name: 同步国内镜像 (Coding/Gitee Pages)
 
 # 把 gh-pages（已构建好的完整静态站点）强推到国内可直连的静态托管，
 # 解决 GitHub Pages 在国内访问受限的问题。
-# 默认被 secrets.CODING_TOKEN / secrets.GITEE_TOKEN 门控：未配置前不会运行，配置后全自动。
+# 默认被 GITEE_TOKEN / CODING_TOKEN 门控：未配置前不会真正推送，配置后全自动。
+#
+# 注意：GitHub Actions 不允许在 if: 条件中直接引用 secrets 上下文，
+# 因此本文件先把 secret 映射到 job 级 env，再以 env 作为 if 判断依据。
 
 on:
   workflow_dispatch: {}
@@ -15,7 +18,13 @@ permissions:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    if: ${{ secrets.CODING_TOKEN != '' || secrets.GITEE_TOKEN != '' }}
+    env:
+      CODING_TOKEN: ${{ secrets.CODING_TOKEN }}
+      CODING_REPO:  ${{ secrets.CODING_REPO }}
+      CODING_BRANCH: ${{ secrets.CODING_BRANCH || 'coding-pages' }}
+      GITEE_TOKEN:  ${{ secrets.GITEE_TOKEN }}
+      GITEE_REPO:   ${{ secrets.GITEE_REPO }}
+      GITEE_BRANCH: ${{ secrets.GITEE_BRANCH || 'master' }}
     steps:
       - name: 检出已构建站点 (gh-pages)
         uses: actions/checkout@v4
@@ -24,37 +33,27 @@ jobs:
           fetch-depth: 1
 
       - name: 推送到 Coding Pages
-        if: ${{ secrets.CODING_TOKEN != '' }}
-        env:
-          TOKEN: ${{ secrets.CODING_TOKEN }}
-          REPO: ${{ secrets.CODING_REPO }}      # 形如 e.coding.net/<team>/<proj>/<repo>.git
-          BRANCH: ${{ secrets.CODING_BRANCH || 'coding-pages' }}
+        if: ${{ env.CODING_TOKEN != '' && env.CODING_REPO != '' }}
         run: |
           set -e
-          [ -z "$REPO" ] && { echo "未配置 CODING_REPO，跳过"; exit 0; }
-          path="${REPO#*//}"; USER="${path#*/}"; USER="${USER%%/*}"   # 从 e.coding.net/<team>/... 提取 <team>
+          path="${CODING_REPO#*//}"; USER="${path#*/}"; USER="${USER%%/*}"
           rm -rf .git
           git init -q
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add -A
           git commit -q -m "mirror: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push -f "https://$USER:$TOKEN@${REPO#https://}" "HEAD:$BRANCH"
+          git push -f "https://$USER:$CODING_TOKEN@${CODING_REPO#https://}" "HEAD:$CODING_BRANCH"
 
       - name: 推送到 Gitee Pages
-        if: ${{ secrets.GITEE_TOKEN != '' }}
-        env:
-          TOKEN: ${{ secrets.GITEE_TOKEN }}
-          REPO: ${{ secrets.GITEE_REPO }}        # 形如 gitee.com/<user>/<repo>.git
-          BRANCH: ${{ secrets.GITEE_BRANCH || 'master' }}
+        if: ${{ env.GITEE_TOKEN != '' && env.GITEE_REPO != '' }}
         run: |
           set -e
-          [ -z "$REPO" ] && { echo "未配置 GITEE_REPO，跳过"; exit 0; }
-          path="${REPO#*//}"; USER="${path#*/}"; USER="${USER%%/*}"   # 从 gitee.com/<user>/... 提取 <user>
+          path="${GITEE_REPO#*//}"; USER="${path#*/}"; USER="${USER%%/*}"
           rm -rf .git
           git init -q
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add -A
           git commit -q -m "mirror: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push -f "https://$USER:$TOKEN@${REPO#https://}" "HEAD:$BRANCH"
+          git push -f "https://$USER:$GITEE_TOKEN@${GITEE_REPO#https://}" "HEAD:$GITEE_BRANCH"

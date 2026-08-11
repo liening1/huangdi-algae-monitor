@@ -38,6 +38,14 @@
   </div>
 </nav>
 
+<!-- 国内镜像提示横幅（GitHub Pages 国内访问受限时提示切换） -->
+<div class="mirror-banner" id="mirrorBanner" hidden>
+  <span class="mirror-ico" aria-hidden="true">🛰️</span>
+  <span class="mirror-text" id="mirrorText">检测到当前网络访问原站较慢，可切换到国内镜像以获得更快加载。</span>
+  <a class="mirror-btn" id="mirrorBtn" href="#">切换到国内镜像 »</a>
+  <button class="mirror-close" id="mirrorClose" type="button" aria-label="关闭">×</button>
+</div>
+
 <!-- Hero -->
 <header class="hero" id="top">
   <div class="hero-content">
@@ -245,6 +253,7 @@
 <footer class="footer">
   <div class="footer-brand">黄埭镇蓝藻卫星监测系统</div>
   <div class="muted">数据源：Copernicus Sentinel-2 / JRC Global Surface Water / OpenStreetMap · 底图 © 高德 AutoNavi / Esri</div>
+  <div class="muted footer-links">访问受限？<a href="#" id="footerMirror">切换到国内镜像站点 »</a></div>
 </footer>
 
 <script src="static/vendor/leaflet/leaflet.js"></script>

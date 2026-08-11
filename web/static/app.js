@@ -36,6 +36,59 @@ let TREND_METRICS = { water: true, bloom: true, bloomml: false };
 
 const $ = (id) => document.getElementById(id);
 const ts = () => "?t=" + REV;
+
+// ---------- 国内镜像切换（解决 GitHub Pages 在国内访问受限） ----------
+// 在此填入国内镜像站点地址（如 Coding Pages：https://<user>.coding.me/huangdi-algae-monitor/
+// 或 Gitee Pages：https://<user>.gitee.io/huangdi-algae-monitor/）。留空则不启用提示。
+const CN_MIRROR = "";
+const GH_SITE = "https://liening1.github.io/huangdi-algae-monitor/";
+(function initMirror() {
+  try {
+    const banner = $("mirrorBanner"), btn = $("mirrorBtn"),
+          close = $("mirrorClose"), txt = $("mirrorText"), footerMirror = $("footerMirror");
+    if (!banner) return;
+    const params = new URLSearchParams(location.search);
+    const force = params.get("cn");                 // ?cn=1 强制镜像，?cn=0 强制原站
+    const pref = localStorage.getItem("prefer_mirror");
+    let mirrorHost = "";
+    try { mirrorHost = CN_MIRROR ? new URL(CN_MIRROR).host : ""; } catch (e) {}
+    const onMirror = mirrorHost && location.host === mirrorHost;
+
+    // 已在镜像站：提供返回原站入口，不再探测
+    if (onMirror) {
+      if (txt) txt.textContent = "你正在访问国内镜像站点。如镜像数据更新滞后，可返回 GitHub 原站查看最新结果。";
+      if (btn) { btn.textContent = "返回 GitHub 原站 »"; btn.href = GH_SITE; }
+      if (footerMirror) footerMirror.href = GH_SITE;
+      banner.hidden = false;
+      if (close) close.onclick = () => { banner.hidden = true; };
+      return;
+    }
+    if (footerMirror && CN_MIRROR) footerMirror.href = CN_MIRROR;
+    if (close) close.onclick = () => { banner.hidden = true; localStorage.setItem("mirror_dismissed", "1"); };
+
+    if (!CN_MIRROR) return;                          // 未配置镜像则不探测
+    if (force === "0" || pref === "0") return;
+    if (force === "1" || pref === "1") { goMirror(); return; }
+
+    // 探测原站数据资源延迟（最能反映国内访问卡顿），超时/失败则提示切换
+    const probeStart = performance.now();
+    let ok = false;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4500);
+    fetch("outputs/manifest.json" + ts(), { signal: controller.signal, cache: "no-store" })
+      .then((r) => { clearTimeout(timer); ok = r.ok; })
+      .catch(() => { clearTimeout(timer); ok = false; })
+      .finally(() => {
+        const dt = performance.now() - probeStart;
+        if (!ok || dt > 4000) banner.hidden = false; // 原站慢/不可达 → 弹出提示
+      });
+    if (btn) btn.onclick = (e) => { e.preventDefault(); goMirror(); };
+    function goMirror() {
+      localStorage.setItem("prefer_mirror", "1");
+      location.href = CN_MIRROR + location.hash;
+    }
+  } catch (e) {}
+})();
 // 由当前 MODE/ROI 推导组合键（与后端 combo_key_of 一致）
 function currentComboKey() {
   return (MODE === "composite" ? "composite" : MODE) + "_" + ROI;

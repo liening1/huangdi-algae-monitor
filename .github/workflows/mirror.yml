@@ -1,0 +1,58 @@
+name: 同步国内镜像 (Coding/Gitee Pages)
+
+# 把 gh-pages（已构建好的完整静态站点）强推到国内可直连的静态托管，
+# 解决 GitHub Pages 在国内访问受限的问题。
+# 默认被 secrets.CODING_TOKEN 门控：未配置前不会运行，配置后全自动。
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "30 2 * * *"   # 北京时间 10:30（daily 主站重建后约半小时）
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    if: ${{ secrets.CODING_TOKEN != '' || secrets.GITEE_TOKEN != '' }}
+    steps:
+      - name: 检出已构建站点 (gh-pages)
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 1
+
+      - name: 推送到 Coding Pages
+        if: ${{ secrets.CODING_TOKEN != '' }}
+        env:
+          TOKEN: ${{ secrets.CODING_TOKEN }}
+          REPO: ${{ secrets.CODING_REPO }}      # 形如 e.coding.net/<team>/<proj>/<repo>.git
+          BRANCH: ${{ secrets.CODING_BRANCH || 'coding-pages' }}
+        run: |
+          set -e
+          [ -z "$REPO" ] && { echo "未配置 CODING_REPO，跳过"; exit 0; }
+          rm -rf .git
+          git init -q
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add -A
+          git commit -q -m "mirror: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push -f "https://$TOKEN@${REPO#https://}" "HEAD:$BRANCH"
+
+      - name: 推送到 Gitee Pages
+        if: ${{ secrets.GITEE_TOKEN != '' }}
+        env:
+          TOKEN: ${{ secrets.GITEE_TOKEN }}
+          REPO: ${{ secrets.GITEE_REPO }}        # 形如 gitee.com/<user>/<repo>.git
+          BRANCH: ${{ secrets.GITEE_BRANCH || 'master' }}
+        run: |
+          set -e
+          [ -z "$REPO" ] && { echo "未配置 GITEE_REPO，跳过"; exit 0; }
+          rm -rf .git
+          git init -q
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add -A
+          git commit -q -m "mirror: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push -f "https://$TOKEN@${REPO#https://}" "HEAD:$BRANCH"

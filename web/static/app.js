@@ -38,8 +38,8 @@ const $ = (id) => document.getElementById(id);
 const ts = () => "?t=" + REV;
 
 // ---------- 国内镜像切换（解决 GitHub Pages 在国内访问受限） ----------
-// 在此填入国内镜像站点地址（Coding Pages，形如 https://<xxxx>.coding-pages.com/）。
-// 留空则不启用提示。Gitee Pages 已弃用（需实名且免费版不自动部署）。
+// 在此填入国内镜像站点地址（EdgeOne Pages，形如 https://<项目名>.pages.dev/）。
+// 留空则不启用提示。详见 docs/国内镜像部署指南.md（Coding 已暂停注册，Gitee 需实名）。
 const CN_MIRROR = "";
 const GH_SITE = "https://liening1.github.io/huangdi-algae-monitor/";
 (function initMirror() {

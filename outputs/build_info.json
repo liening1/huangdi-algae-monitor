@@ -1,0 +1,16 @@
+{
+  "built_at": "2026-08-22T02:49:00Z",
+  "zoom": [
+    10,
+    15
+  ],
+  "layers": [
+    "rgb",
+    "ndci",
+    "water",
+    "bloom",
+    "old",
+    "bloomml",
+    "bloommlp"
+  ]
+}

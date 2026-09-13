@@ -1,0 +1,58 @@
+{
+  "ready": true,
+  "scene_id": "S2C_51RTQ_20260909_0_L2A",
+  "date": "2026-09-09",
+  "cloud": 42.4,
+  "n_scenes": 4,
+  "scene_dates": [
+    "2026-07-31",
+    "2026-08-02",
+    "2026-08-20",
+    "2026-09-09"
+  ],
+  "composite": true,
+  "roi": "5km_buffer",
+  "bbox": [
+    120.4717559,
+    31.386768,
+    120.61064,
+    31.477232
+  ],
+  "data_bbox": [
+    120.4717559,
+    31.386768,
+    120.61064,
+    31.477232
+  ],
+  "water_ha": 281.5,
+  "water_old_ha": 611.6,
+  "water_gain_ha": -330.1,
+  "bloom_ha": 5.65,
+  "bloom_px": 565,
+  "bloom_features": 251,
+  "bloom_ml_ha": 1.32,
+  "bloom_ml_px": 132,
+  "bloom_ml_features": 62,
+  "ml_enabled": true,
+  "status": "预警",
+  "centroid": [
+    120.55961,
+    31.42686
+  ],
+  "in_boundary_ha": 119.7,
+  "in_boundary_pct": 42.5,
+  "gee_water_ha": 281.5,
+  "gee_bloom_ha": 146.82,
+  "ndci_p50": 0.106,
+  "ndci_p90": 0.267,
+  "ndci_max": 0.646,
+  "fai_p50": -0.0195,
+  "mci_p50": 0.017,
+  "thresholds": {
+    "ndci": 0.1,
+    "fai": 0.005,
+    "mci": 0.005,
+    "jrc": 10
+  },
+  "rev": 0
+}

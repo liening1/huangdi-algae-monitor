@@ -1,0 +1,55 @@
+{
+  "ready": true,
+  "scene_id": "S2C_51RTQ_20260909_0_L2A",
+  "date": "2026-09-09",
+  "cloud": 42.4,
+  "n_scenes": 1,
+  "scene_dates": [
+    "2026-09-09"
+  ],
+  "composite": false,
+  "roi": "5km_buffer",
+  "bbox": [
+    120.4717559,
+    31.386768,
+    120.61064,
+    31.477232
+  ],
+  "data_bbox": [
+    120.4717559,
+    31.386768,
+    120.61064,
+    31.477232
+  ],
+  "water_ha": 137.5,
+  "water_old_ha": 178.6,
+  "water_gain_ha": -41.1,
+  "bloom_ha": 3.26,
+  "bloom_px": 326,
+  "bloom_features": 183,
+  "bloom_ml_ha": 0.58,
+  "bloom_ml_px": 58,
+  "bloom_ml_features": 26,
+  "ml_enabled": true,
+  "status": "正常",
+  "centroid": [
+    120.56279,
+    31.42571
+  ],
+  "in_boundary_ha": 49.4,
+  "in_boundary_pct": 35.9,
+  "gee_water_ha": 137.5,
+  "gee_bloom_ha": 54.21,
+  "ndci_p50": 0.081,
+  "ndci_p90": 0.179,
+  "ndci_max": 0.365,
+  "fai_p50": -0.0179,
+  "mci_p50": 0.02,
+  "thresholds": {
+    "ndci": 0.1,
+    "fai": 0.005,
+    "mci": 0.005,
+    "jrc": 10
+  },
+  "rev": 0
+}
